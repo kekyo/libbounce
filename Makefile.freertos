@@ -1,0 +1,83 @@
+CC ?= cc
+CXX ?= c++
+GIT ?= git
+BUILD_DIR ?= build/freertos
+OBJ_DIR ?= $(BUILD_DIR)/obj
+TEST_DIR ?= $(BUILD_DIR)/tests
+THREAD_FLAGS := -pthread
+FREERTOS_KERNEL_TAG ?= V11.2.0
+FREERTOS_KERNEL_DIR ?= $(BUILD_DIR)/FreeRTOS-Kernel-$(FREERTOS_KERNEL_TAG)
+FREERTOS_KERNEL_READY := $(FREERTOS_KERNEL_DIR)/.bounce-ready
+
+CPPFLAGS ?= -D_XOPEN_SOURCE=700 -Iinclude -I. -Itests -Itests/freertos
+CFLAGS ?= -std=c99 -O2 -Wall -Wextra -pedantic -Wno-unused-parameter -Wno-unused-function
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic -Wno-unused-parameter -Wno-unused-function
+LDFLAGS ?=
+LDLIBS ?=
+
+FREERTOS_CPPFLAGS := \
+	-DBOUNCE_FREERTOS=1 \
+	-I$(FREERTOS_KERNEL_DIR)/include \
+	-I$(FREERTOS_KERNEL_DIR)/portable/ThirdParty/GCC/Posix
+
+PROJECT_SOURCES := \
+	src/freertos/bounce_tls_freertos.c \
+	src/freertos/bounce_freertos_timer.c \
+	src/freertos/bounce_freertos.c
+
+ifeq ($(BOUNCE_FREERTOS_ENABLE_FD_AWAIT),1)
+FREERTOS_CPPFLAGS += -DBOUNCE_FREERTOS_ENABLE_FD_AWAIT=1
+PROJECT_SOURCES += src/freertos/bounce_freertos_fd_espidf.c
+endif
+
+FREERTOS_SOURCES := \
+	$(FREERTOS_KERNEL_DIR)/list.c \
+	$(FREERTOS_KERNEL_DIR)/queue.c \
+	$(FREERTOS_KERNEL_DIR)/tasks.c \
+	$(FREERTOS_KERNEL_DIR)/timers.c \
+	$(FREERTOS_KERNEL_DIR)/portable/ThirdParty/GCC/Posix/port.c \
+	$(FREERTOS_KERNEL_DIR)/portable/ThirdParty/GCC/Posix/utils/wait_for_event.c
+
+SOURCES := $(PROJECT_SOURCES) $(FREERTOS_SOURCES)
+TEST_SOURCES := \
+	tests/test_harness.c \
+	tests/shared/test_posix_freertos_shared.c \
+	tests/shared/test_timer_header_shared.c \
+	tests/freertos/test_freertos_runtime.c \
+	tests/freertos/test_freertos.c \
+	tests/freertos/test_cpp_freertos_runtime.cpp \
+	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_timer_header_cpp_shared.cpp \
+	tests/shared/test_cpp_promise_shared.cpp
+TEST_HEADERS := \
+	tests/test_harness.h \
+	tests/shared/test_posix_freertos_shared.h \
+	tests/shared/test_posix_freertos_runtime.h \
+	tests/shared/test_cpp_runtime.h \
+	tests/freertos/FreeRTOSConfig.h
+TESTS := $(TEST_DIR)/test_freertos
+
+BUILD_SHARED := 0
+PLATFORM_CPPFLAGS := $(FREERTOS_CPPFLAGS)
+EXTRA_COMMON_HEADERS := tests/freertos/FreeRTOSConfig.h
+EXTRA_OBJ_ORDER_ONLY := $(FREERTOS_KERNEL_READY)
+STATIC_LIB_OBJECTS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(PROJECT_SOURCES))
+EXTRA_TEST_LINK_OBJECTS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(FREERTOS_SOURCES))
+
+include Makefile.common
+
+.PHONY: test clean kernel-fetch
+
+test: $(TESTS)
+	./$(TESTS)
+
+kernel-fetch: $(FREERTOS_KERNEL_READY)
+
+$(FREERTOS_SOURCES): $(FREERTOS_KERNEL_READY)
+	@:
+
+$(FREERTOS_KERNEL_READY): | $(BUILD_DIR)
+	if [ ! -d "$(FREERTOS_KERNEL_DIR)" ]; then $(GIT) clone --depth=1 --branch $(FREERTOS_KERNEL_TAG) https://github.com/FreeRTOS/FreeRTOS-Kernel.git "$(FREERTOS_KERNEL_DIR)"; fi
+	touch $@
+
+clean: clean-common

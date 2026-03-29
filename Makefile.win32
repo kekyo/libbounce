@@ -1,0 +1,51 @@
+CC ?= x86_64-w64-mingw32-gcc-win32
+CXX = $(subst gcc,g++,$(CC))
+WINE ?= wine
+WINEBOOT ?= wineboot
+PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+PREPARE_WINE_RUNTIME ?= $(PROJECT_ROOT)/scripts/prepare_wine_runtime.sh
+RUN_WINE_TEST ?= $(PROJECT_ROOT)/scripts/run_wine_test.sh
+CC_BASENAME := $(notdir $(CC))
+BUILD_DIR ?= build/$(CC_BASENAME)
+THREAD_FLAGS :=
+SOURCES := \
+	src/win32/bounce_tls_win32.c \
+	src/win32/bounce_win32.c \
+	src/win32/bounce_win32_timer.c
+TEST_SOURCES := \
+	tests/win32/test_win32.c \
+	tests/shared/test_timer_header_shared.c \
+	tests/win32/test_cpp_runtime_win32.cpp \
+	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_timer_header_cpp_shared.cpp \
+	tests/shared/test_cpp_promise_shared.cpp \
+	tests/test_harness.c
+TEST_HEADERS := tests/test_harness.h tests/shared/test_cpp_runtime.h
+EXE_EXT := .exe
+SHARED_LIB := $(BUILD_DIR)/libbounce.dll
+IMPLIB := $(BUILD_DIR)/libbounce.dll.a
+SHARED_OBJECTS := $(OBJECTS)
+SHARED_LDFLAGS := -Wl,--out-implib,$(IMPLIB)
+PLATFORM_LDLIBS := -Wl,-Bstatic -Wl,-Bdynamic -static-libgcc -static-libstdc++ -luser32
+SHARED_LDLIBS := -luser32
+
+ifeq ($(findstring i686,$(CC_BASENAME)),i686)
+WINE_ARCH ?= win32
+else
+WINE_ARCH ?= win64
+endif
+
+WINE_PREFIX := $(abspath $(BUILD_DIR)/wineprefix)
+WINE_PREFIX_ARCHIVE := $(BUILD_DIR)/wineprefix.tar
+WINE_RUNTIME_NAME ?= libbounce-runtime
+WINE_TEST_COMMAND = C:/$(WINE_RUNTIME_NAME)/$(notdir $(TESTS))
+WINE_ENV := WINEPREFIX=$(WINE_PREFIX) WINEARCH=$(WINE_ARCH) WINEDEBUG=-all
+
+include Makefile.common
+
+.PHONY: test clean
+
+test: $(STATIC_LIB) $(SHARED_LIB) $(TESTS) $(PREPARE_WINE_RUNTIME) $(RUN_WINE_TEST)
+	WINE="$(WINE)" WINEBOOT="$(WINEBOOT)" $(WINE_ENV) sh "$(RUN_WINE_TEST)" "$(WINE_PREFIX)" "$(WINE_PREFIX_ARCHIVE)" "$(WINE_RUNTIME_NAME)" "$(TESTS)" "$(SHARED_LIB)" "$(WINE_TEST_COMMAND)"
+
+clean: clean-common

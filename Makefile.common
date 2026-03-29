@@ -1,0 +1,97 @@
+CC ?= cc
+CXX ?= c++
+AR ?= ar
+CPPFLAGS ?= -Iinclude -I. -Itests
+CFLAGS ?= -std=c99 -O2 -g -Wall -Wextra -Werror -pedantic
+CXXFLAGS ?= -std=c++17 -O2 -g -Wall -Wextra -Werror -pedantic
+LDFLAGS ?=
+LDLIBS ?=
+EXE_EXT ?=
+PIC_CFLAGS ?=
+BUILD_SHARED ?= 1
+PLATFORM_CPPFLAGS ?=
+PLATFORM_CXXFLAGS ?=
+PLATFORM_LDLIBS ?=
+SHARED_OBJECTS ?=
+SHARED_LDFLAGS ?= -Wl,--no-undefined
+SHARED_LDLIBS ?=
+SOURCES ?=
+TEST_SOURCES ?=
+TEST_HEADERS ?= tests/test_harness.h
+EXTRA_COMMON_HEADERS ?=
+EXTRA_OBJ_ORDER_ONLY ?=
+EXTRA_TEST_LINK_OBJECTS ?=
+
+PUBLIC_HEADERS := \
+	include/libbounce/bounce.h \
+	include/libbounce/timer.h \
+	include/libbounce/promise.h \
+	include/libbounce/posix.h \
+	include/libbounce/generic.h \
+	include/libbounce/posix_glib.h \
+	include/libbounce/utils.h \
+	include/libbounce/freertos.h \
+	include/libbounce/win32.h
+
+COMMON_HEADERS := $(shell find include src -type f -name '*.h' | sort) $(EXTRA_COMMON_HEADERS)
+
+OBJ_DIR := $(BUILD_DIR)/obj
+TEST_DIR := $(BUILD_DIR)/tests
+OBJECTS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(SOURCES))
+PIC_OBJECTS := $(patsubst %.c,$(OBJ_DIR)/%-pic.o,$(SOURCES))
+TEST_C_SOURCES := $(filter %.c,$(TEST_SOURCES))
+TEST_CPP_SOURCES := $(filter %.cpp,$(TEST_SOURCES))
+TEST_OBJECTS := $(patsubst %.c,$(OBJ_DIR)/%.test.o,$(TEST_C_SOURCES)) \
+	$(patsubst %.cpp,$(OBJ_DIR)/%.test.o,$(TEST_CPP_SOURCES))
+TEST_LINK := $(if $(strip $(TEST_CPP_SOURCES)),$(CXX),$(CC))
+
+STATIC_LIB ?= $(BUILD_DIR)/libbounce.a
+TESTS ?= $(TEST_DIR)/test_win32$(EXE_EXT)
+STATIC_LIB_OBJECTS ?= $(OBJECTS)
+TEST_LINK_OBJECTS = $(TEST_OBJECTS) $(STATIC_LIB) $(EXTRA_TEST_LINK_OBJECTS)
+ALL_TARGETS = $(STATIC_LIB)
+
+ifneq ($(strip $(BUILD_SHARED)),0)
+ifneq ($(strip $(SHARED_LIB)),)
+ALL_TARGETS += $(SHARED_LIB)
+endif
+endif
+
+.PHONY: all clean-common
+
+all: $(ALL_TARGETS)
+
+$(STATIC_LIB): $(STATIC_LIB_OBJECTS) | $(BUILD_DIR)
+	$(AR) rcs $@ $(STATIC_LIB_OBJECTS)
+
+ifneq ($(strip $(BUILD_SHARED)),0)
+ifneq ($(strip $(SHARED_LIB)),)
+$(SHARED_LIB): $(SHARED_OBJECTS) | $(BUILD_DIR)
+	$(CC) -shared $(THREAD_FLAGS) $(LDFLAGS) $(SHARED_LDFLAGS) -o $@ $(SHARED_OBJECTS) $(LDLIBS) $(SHARED_LDLIBS)
+endif
+endif
+
+$(TESTS): $(TEST_LINK_OBJECTS) $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(TEST_DIR)
+	$(TEST_LINK) $(THREAD_FLAGS) $(LDFLAGS) -o $@ $(TEST_LINK_OBJECTS) $(LDLIBS) $(PLATFORM_LDLIBS)
+
+$(OBJ_DIR)/%.o: %.c $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(OBJ_DIR) $(EXTRA_OBJ_ORDER_ONLY)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(PLATFORM_CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%-pic.o: %.c $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(OBJ_DIR) $(EXTRA_OBJ_ORDER_ONLY)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(PLATFORM_CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) $(PIC_CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%.test.o: %.c $(TEST_HEADERS) $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(OBJ_DIR) $(EXTRA_OBJ_ORDER_ONLY)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(PLATFORM_CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%.test.o: %.cpp $(TEST_HEADERS) $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(OBJ_DIR) $(EXTRA_OBJ_ORDER_ONLY)
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(PLATFORM_CPPFLAGS) $(CXXFLAGS) $(PLATFORM_CXXFLAGS) $(THREAD_FLAGS) -c $< -o $@
+
+$(BUILD_DIR) $(OBJ_DIR) $(TEST_DIR):
+	mkdir -p $@
+
+clean-common:
+	rm -rf $(BUILD_DIR)

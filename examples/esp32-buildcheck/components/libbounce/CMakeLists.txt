@@ -1,0 +1,20 @@
+idf_component_register(
+  SRCS
+    "../../../../src/utils.c"
+    "../../../../src/freertos/bounce_freertos.c"
+    "../../../../src/freertos/bounce_freertos_timer.c"
+    "../../../../src/freertos/bounce_freertos_fd_espidf.c"
+  INCLUDE_DIRS
+    "../../../../include"
+  REQUIRES
+    freertos
+  PRIV_REQUIRES
+    lwip
+    vfs
+)
+
+target_compile_definitions(
+  ${COMPONENT_LIB}
+  PRIVATE
+    BOUNCE_FREERTOS_ENABLE_FD_AWAIT=1
+)

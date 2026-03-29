@@ -1,0 +1,34 @@
+CC ?= cc
+BUILD_DIR ?= build/generic
+THREAD_FLAGS := -pthread
+CFLAGS ?= -std=c11 -O2 -g -Wall -Wextra -Werror -pedantic
+SOURCES := \
+	src/generic/bounce_tls_generic.c \
+	src/generic/bounce_generic_timer.c \
+	src/generic/bounce_generic.c
+TEST_SOURCES := \
+	tests/generic/test_generic.c \
+	tests/shared/test_timer_header_shared.c \
+	tests/shared/test_cpp_runtime_host.cpp \
+	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_timer_header_cpp_shared.cpp \
+	tests/shared/test_cpp_promise_shared.cpp \
+	tests/test_harness.c
+TEST_HEADERS := tests/test_harness.h tests/shared/test_cpp_runtime.h
+TESTS = $(TEST_DIR)/test_generic$(EXE_EXT)
+STATIC_LIB := $(BUILD_DIR)/libbounce-generic.a
+SHARED_LIB = $(BUILD_DIR)/libbounce-generic.so
+SHARED_OBJECTS = $(PIC_OBJECTS)
+PIC_CFLAGS := -fPIC
+PLATFORM_CPPFLAGS := -DBOUNCE_GENERIC=1
+PLATFORM_LDLIBS := -latomic
+SHARED_LDLIBS := -latomic
+
+include Makefile.common
+
+.PHONY: test clean
+
+test: $(STATIC_LIB) $(SHARED_LIB) $(TESTS)
+	./$(TESTS)
+
+clean: clean-common

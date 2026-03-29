@@ -1,0 +1,36 @@
+CC ?= cc
+PKG_CONFIG ?= pkg-config
+BUILD_DIR ?= build/posix_glib
+THREAD_FLAGS := -pthread
+GLIB_CFLAGS := $(shell $(PKG_CONFIG) --cflags glib-2.0 gobject-2.0 gio-2.0)
+GLIB_LIBS := $(shell $(PKG_CONFIG) --libs glib-2.0 gobject-2.0 gio-2.0)
+SOURCES := \
+	src/posix-glib/bounce_tls_posix_glib.c \
+	src/posix-glib/bounce_posix_glib.c \
+	src/posix-glib/bounce_posix_glib_timer.c
+TEST_SOURCES := \
+	tests/posix-glib/test_posix_glib.c \
+	tests/shared/test_timer_header_shared.c \
+	tests/shared/test_cpp_runtime_host.cpp \
+	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_timer_header_cpp_shared.cpp \
+	tests/shared/test_cpp_promise_shared.cpp \
+	tests/test_harness.c
+TEST_HEADERS := tests/test_harness.h tests/shared/test_cpp_runtime.h
+TESTS = $(TEST_DIR)/test_posix_glib$(EXE_EXT)
+STATIC_LIB := $(BUILD_DIR)/libbounce-glib.a
+SHARED_LIB = $(BUILD_DIR)/libbounce-glib.so
+SHARED_OBJECTS = $(PIC_OBJECTS)
+PIC_CFLAGS := -fPIC
+PLATFORM_CPPFLAGS := -DBOUNCE_POSIX_GLIB=1 $(GLIB_CFLAGS)
+PLATFORM_LDLIBS := $(GLIB_LIBS)
+SHARED_LDLIBS := $(GLIB_LIBS)
+
+include Makefile.common
+
+.PHONY: test clean
+
+test: $(STATIC_LIB) $(SHARED_LIB) $(TESTS)
+	./$(TESTS)
+
+clean: clean-common

@@ -1,0 +1,6 @@
+.idea/
+build/
+test_results/
+artifacts/
+examples/esp32-buildcheck/sdkconfig
+examples/esp32-buildcheck/sdkconfig.old
