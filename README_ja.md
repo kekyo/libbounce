@@ -252,9 +252,12 @@ TLS に core が登録されていない場合、`bounce_get_core()` は
 といった用途がある場合は、あらかじめ `bounce_set_core()` を呼んでおく必要があります。
 
 これは特に、コールバックチェインの途中で次の非同期処理を登録したい場合や、
-C++ 側で `libbounce::bounce::current()` や coroutine 継続復帰先の解決に
+C++ 側で `libbounce::bounce::get_current()` や coroutine 継続復帰先の解決に
 現在の core を使いたい場合に意味があります。
 逆に、常に `BOUNCE_CORE*` を明示的に受け渡す設計なら必須ではありません。
+ただし C++ の `park()` / `park_once()` ラッパーは実行中だけ current core を
+自動公開するため、その間の `get_current()` 解決には追加の attach は不要です。
+一方、C API では引き続き `bounce_set_core()` を明示的に呼ぶ必要があります。
 
 以下は、継続の中で `bounce_get_core()` を使って次の継続を連鎖させる例です。
 
@@ -522,28 +525,27 @@ bounce.shutdown();
 parker.join();
 ```
 
-また、`attach_current()` を使うと、そのスレッドのTLSへ現在の bounce を一時的に公開できます。
-これにより、`libbounce::bounce::current()` から `bounce_ref` を取得できるようになります。
+また、C++ の `park()` / `park_once()` ラッパーは実行中だけ
+そのスレッドの current core を公開するため、
+`libbounce::bounce::get_current()` から非所有の `bounce_base_ref` を取得できます。
 
 ```cpp
 /* bounce core を所有する */
 libbounce::bounce bounce;
-/* 他のヘルパー型も通常の自動変数として保持できる */
-libbounce::timer timer;
+/* parker 上で動く継続を登録する */
+(void)bounce.post([] {
+  /* park 中なら current core を参照できる */
+  auto current = libbounce::bounce::get_current();
 
-{
-  /* 現在スレッドに bounce を一時的にアタッチする */
-  auto attachment = bounce.attach_current();
-  /* TLS から現在の bounce 参照を取得する */
-  auto current = libbounce::bounce::current();
-
-  /* 現在の bounce が取得できたら、その参照経由で継続を登録できる */
-  if (current.has_value()) {
-    (void)current->post([] {
-      /* current() から得た bounce_ref 経由の継続処理 */
+  /* current が取得できたら、その参照経由で継続を登録できる */
+  if (current) {
+    (void)current.post([] {
+      /* get_current() から得た bounce_base_ref 経由の継続処理 */
     });
   }
-}
+});
+/* C++ ラッパーは継続実行中だけ current core を公開する */
+(void)bounce.park_once();
 ```
 
 ライブラリ内部やコールバックチェインの中で「明示的に参照を渡したくないが、現在の bounce は取得したい」という場面で役に立ちます。
@@ -655,13 +657,13 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 
 |型/メソッド|役割|
 |:----|:----|
-|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `park()`, `park_once()`, `shutdown()`, `attach_current()` を持つ|
-|`libbounce::bounce::current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `std::optional<bounce_ref>` として取得する|
-|`libbounce::bounce_ref`|非所有参照。既にどこかで管理している core に対して `post()`, `park()`, `shutdown()` などを行う|
+|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `park()`, `park_once()`, `shutdown()` を持つ|
+|`libbounce::bounce::get_current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `bounce_base_ref` として取得する|
+|`libbounce::bounce_base_ref`|共通の非所有参照。既にどこかで管理している core に対して `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()` などを行う|
+|`libbounce::bounce_ref`|backend 固有の非所有参照。`bounce_base_ref` を拡張し、必要なら backend 固有 helper を持つ|
 |`libbounce::timer`|`BOUNCE_TIMER` の RAII ラッパー。`wait(bounce, duration_msec, ...)` でタイマー待機を登録する|
 |`libbounce::cancellation`|`BOUNCE_CANCELLATION` の RAII ラッパー。`cancel(bounce)` でキャンセルを発行する|
 |`libbounce::cancellation_registration`|キャンセル時継続の RAII ラッパー。`register_canceled(...)` と `unregister()` を持つ|
-|`attach_current()`|スコープの間だけ現在スレッド/タスクへ core を TLS アタッチし、破棄時に元へ戻す|
 
 バックエンドごとの差分は主に `wait(...)`, `raise(...)`, `await(...)` の引数です。
 
@@ -751,9 +753,6 @@ int main(int argc, char **argv) {
   g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), &bounce);
   gtk_widget_show_all(window);
 
-  auto attachment = bounce.attach_current();
-
-  (void)attachment;
   (void)bounce.park();
   return 0;
 }
@@ -767,9 +766,10 @@ BOUNCE_CORE bounce;
 bounce_init_with_main_context(&bounce, g_main_context_default());
 ```
 
-callback や helper から `bounce_get_core()` が必要なら、
-`bounce_park()` へ入る前に `bounce_set_core()` または
-C++ の `attach_current()` を使って current core を公開してください。
+callback や helper から C API の `bounce_get_core()` が必要なら、
+`bounce_park()` へ入る前に `bounce_set_core()` で current core を公開してください。
+C++ の `bounce.park()` / `bounce.park_once()` ラッパーは実行中だけ
+current core を自動公開します。
 
 ---
 

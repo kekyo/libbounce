@@ -364,19 +364,13 @@ int run(int *argc, char ***argv) noexcept {
     g_idle_add(automate_click_on_main_thread, &app);
   }
 
-  {
-    // `bounce_park()` does not publish the current core automatically. Attach
-    // it explicitly so callbacks and coroutine continuations can resolve the
-    // current bounce on this GUI thread.
-    auto attachment = bounce_instance.attach_current();
-
-    (void)attachment;
-    // This becomes the only blocking loop on the GTK thread. Because
-    // `bounce_init_with_main_context()` bound the bounce to GTK's
-    // `GMainContext`, libbounce now pumps both GTK work and bounce-ready work
-    // from the same thread until `shutdown()` drains any pending wait work.
-    (void)bounce_instance.park();
-  }
+  // This becomes the only blocking loop on the GTK thread. Because
+  // `bounce_init_with_main_context()` bound the bounce to GTK's
+  // `GMainContext`, libbounce now pumps both GTK work and bounce-ready work
+  // from the same thread until `shutdown()` drains any pending wait work. The
+  // C++ wrapper publishes the current core while parked so callbacks and
+  // coroutine continuations can resolve it on this GUI thread.
+  (void)bounce_instance.park();
 
   close_fd_if_needed(&app.notify_read_fd);
   join_thread_if_needed(app.write_thread);

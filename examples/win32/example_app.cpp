@@ -308,17 +308,10 @@ int run(HINSTANCE instance, int show_command) noexcept {
   ShowWindow(app.window_handle, show_command);
   (void)UpdateWindow(app.window_handle);
 
-  {
-    // `bounce.park()` does not attach the current core to TLS automatically.
-    // The attachment keeps coroutine continuations and helper lookups on this
-    // GUI thread bound to the same bounce instance while parked.
-    auto attachment = app.bounce.attach_current();
-
-    (void)attachment;
-    // The GUI thread itself becomes the parker. The Win32 backend pumps both
-    // bounce-ready work and the window message queue until shutdown is posted.
-    (void)app.bounce.park();
-  }
+  // The GUI thread itself becomes the parker. The C++ wrapper publishes the
+  // current core while parked, so coroutine continuations and helper lookups
+  // on this thread stay bound to the same bounce instance.
+  (void)app.bounce.park();
 
   return 0;
 }

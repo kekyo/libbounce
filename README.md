@@ -279,8 +279,11 @@ you need to call `bounce_set_core()` in advance.
 
 This matters in particular when you want to register the next async operation in
 the middle of a callback chain, or when C++ code wants to use the current core
-to resolve `libbounce::bounce::current()` or coroutine resumption targets.
+to resolve `libbounce::bounce::get_current()` or coroutine resumption targets.
 Conversely, it is not required if you always pass `BOUNCE_CORE*` explicitly.
+The C++ `park()` and `park_once()` wrappers publish the current core
+automatically while they are running, but the C API still requires explicit
+`bounce_set_core()` when you want `bounce_get_core()` to work on a parker.
 
 The following example uses `bounce_get_core()` inside a continuation to chain
 the next continuation.
@@ -575,29 +578,27 @@ bounce.shutdown();
 parker.join();
 ```
 
-Also, `attach_current()` temporarily publishes the current bounce into the
-thread's TLS.
-That makes `libbounce::bounce::current()` return a `bounce_ref`.
+Also, while the C++ `park()` and `park_once()` wrappers are running, they
+publish the current bounce so `libbounce::bounce::get_current()` resolves to a
+non-owning `bounce_base_ref`.
 
 ```cpp
 /* Own the bounce core */
 libbounce::bounce bounce;
-/* Other helper types can also be kept as ordinary automatic variables */
-libbounce::timer timer;
+/* Queue a continuation that will run on the parker */
+(void)bounce.post([] {
+  /* Read the current bounce reference while parked */
+  auto current = libbounce::bounce::get_current();
 
-{
-  /* Temporarily attach bounce to the current thread */
-  auto attachment = bounce.attach_current();
-  /* Read the current bounce reference from TLS */
-  auto current = libbounce::bounce::current();
-
-  /* If the current bounce is available, register a continuation through it */
-  if (current.has_value()) {
-    (void)current->post([] {
-      /* Continuation body through bounce_ref obtained from current() */
+  /* If the current bounce is available, register another continuation through it */
+  if (current) {
+    (void)current.post([] {
+      /* Continuation body through bounce_base_ref obtained from get_current() */
     });
   }
-}
+});
+/* The C++ wrapper publishes the current core while dispatching continuations */
+(void)bounce.park_once();
 ```
 
 This is useful inside library internals or callback chains when you do not want
@@ -722,13 +723,13 @@ The common types are as follows.
 
 |Type / Method|Role|
 |:----|:----|
-|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `park()`, `park_once()`, `shutdown()`, and `attach_current()`|
-|`libbounce::bounce::current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `std::optional<bounce_ref>`|
-|`libbounce::bounce_ref`|Non-owning reference. Lets you call `post()`, `park()`, `shutdown()`, and similar operations on a core managed elsewhere|
+|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `park()`, `park_once()`, and `shutdown()`|
+|`libbounce::bounce::get_current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `bounce_base_ref`|
+|`libbounce::bounce_base_ref`|Common non-owning reference. Lets you call `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()`, and similar operations on a core managed elsewhere|
+|`libbounce::bounce_ref`|Backend-specific non-owning reference. Extends `bounce_base_ref` with backend-local helper methods where available|
 |`libbounce::timer`|RAII wrapper for `BOUNCE_TIMER`. Registers timer waits with `wait(bounce, duration_msec, ...)`|
 |`libbounce::cancellation`|RAII wrapper for `BOUNCE_CANCELLATION`. Issues cancellation with `cancel(bounce)`|
 |`libbounce::cancellation_registration`|RAII wrapper for cancellation continuations. Exposes `register_canceled(...)` and `unregister()`|
-|`attach_current()`|Attaches the core to the current thread or task via TLS for the lifetime of the scope, then restores the previous state when destroyed|
 
 The backend-specific differences are mostly in the arguments of `wait(...)`,
 `raise(...)`, and `await(...)`.
@@ -824,9 +825,6 @@ int main(int argc, char **argv) {
   g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), &bounce);
   gtk_widget_show_all(window);
 
-  auto attachment = bounce.attach_current();
-
-  (void)attachment;
   (void)bounce.park();
   return 0;
 }
@@ -840,8 +838,10 @@ BOUNCE_CORE bounce;
 bounce_init_with_main_context(&bounce, g_main_context_default());
 ```
 
-If callbacks or helpers need `bounce_get_core()`, call `bounce_set_core()` or
-use the C++ `attach_current()` helper before entering `bounce_park()`.
+If callbacks or helpers need `bounce_get_core()` in the C API, call
+`bounce_set_core()` before entering `bounce_park()`. The C++ `bounce.park()`
+and `bounce.park_once()` wrappers publish the current core automatically while
+they are running.
 
 ---
 

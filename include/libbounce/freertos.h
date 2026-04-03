@@ -361,12 +361,12 @@ public:
   }
 };
 
-class bounce_ref : public bounce_ref_base<BOUNCE_CORE> {
+class bounce_ref : public bounce_base_ref<BOUNCE_CORE> {
 private:
   friend class bounce;
 
   explicit inline bounce_ref(BOUNCE_CORE *core) noexcept
-    : bounce_ref_base(core) {
+    : bounce_base_ref(core) {
   }
 
 public:
@@ -559,14 +559,15 @@ public:
   ~bounce() = default;
 
   /**
-   * @brief Get a non-owning bounce reference from the current attachment or fallback core.
+   * @brief Get a non-owning backend-specific bounce reference from the current
+   * attachment or fallback core.
    * @return Bounce reference when present.
    */
   static inline std::optional<bounce_ref> current() noexcept {
-    BOUNCE_CORE *core = bounce::get_current_core();
+    bounce_base_ref<BOUNCE_CORE> current = bounce::get_current();
 
-    return (core != nullptr) ?
-             std::optional<bounce_ref>(bounce_ref(core)) :
+    return current ?
+             std::optional<bounce_ref>(bounce_ref(current.get_core())) :
              std::nullopt;
   }
 

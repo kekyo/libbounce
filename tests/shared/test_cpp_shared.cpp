@@ -83,6 +83,11 @@ static_assert(
 static_assert(
   !std::is_move_assignable<libbounce::timer>::value,
   "libbounce::timer must not be move assignable");
+static_assert(
+  std::is_same<
+    decltype(libbounce::bounce::get_current()),
+    libbounce::bounce_base_ref<BOUNCE_CORE>>::value,
+  "libbounce::bounce::get_current must return bounce_base_ref");
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
 static_assert(
@@ -386,27 +391,28 @@ extern "C" void test_cpp_wrapper_attach_current_timeout_await_runs(void) {
   double started_ms;
 
   test_completion_context_init(&completion_context);
-  ASSERT_TRUE(!libbounce::bounce::current().has_value());
+  ASSERT_TRUE(!libbounce::bounce::get_current());
 
   {
     libbounce::timer timer;
-    auto attachment = bounce_instance.attach_current();
-    auto current = libbounce::bounce::current();
-
-    (void)attachment;
-    ASSERT_TRUE(current.has_value());
-    ASSERT_TRUE(current->get_core() == bounce_instance.get_core());
     ASSERT_TRUE(
       timer.wait(
-        *current,
+        bounce_instance,
         1u,
-        test_cpp_completion_callback,
-        &completion_context,
+        [&bounce_instance, &completion_context](BOUNCE_COMPLETION_RESULT result) {
+          auto current = libbounce::bounce::get_current();
+
+          ASSERT_TRUE(current);
+          ASSERT_TRUE(current.get_core() == bounce_instance.get_core());
+          test_record_completion(&completion_context, result);
+        },
         NULL));
 
     started_ms = test_cpp_monotonic_now_ms();
     while (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
+      ASSERT_TRUE(!libbounce::bounce::get_current());
       ASSERT_TRUE(bounce_instance.park_once());
+      ASSERT_TRUE(!libbounce::bounce::get_current());
       ASSERT_TRUE((test_cpp_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
       if (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
         test_cpp_yield_park_once_poll();
@@ -414,7 +420,7 @@ extern "C" void test_cpp_wrapper_attach_current_timeout_await_runs(void) {
     }
   }
 
-  ASSERT_TRUE(!libbounce::bounce::current().has_value());
+  ASSERT_TRUE(!libbounce::bounce::get_current());
   test_assert_completion_on_current_executor(
     &completion_context,
     BOUNCE_COMPLETION_COMPLETED);
@@ -424,32 +430,39 @@ extern "C" void test_cpp_wrapper_attach_current_restores_fallback_view(void) {
   libbounce::bounce bounce_instance;
   libbounce::bounce fallback_before;
   libbounce::bounce fallback_after;
+  TEST_COMPLETION_CONTEXT completion_context;
 
+  test_completion_context_init(&completion_context);
   ::bounce_set_fallback_core(NULL);
   ::bounce_set_core(NULL);
-  ASSERT_TRUE(!libbounce::bounce::current().has_value());
+  ASSERT_TRUE(!libbounce::bounce::get_current());
 
   ::bounce_set_fallback_core(fallback_before.get_core());
-  ASSERT_TRUE(libbounce::bounce::current().has_value());
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_before.get_core());
+
   ASSERT_TRUE(
-    libbounce::bounce::current()->get_core() == fallback_before.get_core());
+    bounce_instance.post(
+      [&bounce_instance, &completion_context](BOUNCE_COMPLETION_RESULT result) {
+        auto current = libbounce::bounce::get_current();
 
-  {
-    auto attachment = bounce_instance.attach_current();
-    auto current = libbounce::bounce::current();
-
-    (void)attachment;
-    ASSERT_TRUE(current.has_value());
-    ASSERT_TRUE(current->get_core() == bounce_instance.get_core());
-  }
+        ASSERT_TRUE(current);
+        ASSERT_TRUE(current.get_core() == bounce_instance.get_core());
+        test_record_completion(&completion_context, result);
+      }));
+  ASSERT_TRUE(bounce_instance.park_once());
+  test_assert_completion_on_current_executor(
+    &completion_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_before.get_core());
 
   ::bounce_set_fallback_core(fallback_after.get_core());
-  ASSERT_TRUE(libbounce::bounce::current().has_value());
-  ASSERT_TRUE(
-    libbounce::bounce::current()->get_core() == fallback_after.get_core());
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_after.get_core());
 
   ::bounce_set_fallback_core(NULL);
-  ASSERT_TRUE(!libbounce::bounce::current().has_value());
+  ASSERT_TRUE(!libbounce::bounce::get_current());
 }
 
 extern "C" void test_cpp_wrapper_park_once_returns_before_timeout_completion(void) {
@@ -623,11 +636,11 @@ extern "C" void test_cpp_wrapper_current_post_runs_on_attached_parker(void) {
   ASSERT_TRUE(
     bounce_instance.post(
       [&context](BOUNCE_COMPLETION_RESULT result) {
-        auto current = libbounce::bounce::current();
+        auto current = libbounce::bounce::get_current();
 
-        ASSERT_TRUE(current.has_value());
+        ASSERT_TRUE(current);
         ASSERT_TRUE(
-          current->post(
+          current.post(
             [&context](BOUNCE_COMPLETION_RESULT nested_result) {
               __atomic_store_n(
                 &context.nested_order,

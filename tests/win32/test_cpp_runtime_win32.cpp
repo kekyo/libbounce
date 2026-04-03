@@ -368,9 +368,6 @@ static unsigned __stdcall test_cpp_runtime_parker_proc(
   void *parameter) {
   TEST_CPP_RUNTIME_PARKER_CONTEXT *context =
     static_cast<TEST_CPP_RUNTIME_PARKER_CONTEXT *>(parameter);
-  auto attachment = context->bounce->attach_current();
-
-  (void)attachment;
   test_cpp_runtime_mark_started(context);
   test_cpp_runtime_mark_finished(
     context,

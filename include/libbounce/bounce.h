@@ -241,57 +241,49 @@ template<typename T = void> class promise;
 
 template <typename TBOUNCE_CORE> class bounce_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_TIMER> class timer_base;
+template <typename TBOUNCE_CORE> class bounce_base_ref;
 
-template <typename TBOUNCE_CORE> class core_attachment_base {
-private:
-  TBOUNCE_CORE *previous_core_;
-  bool active_;
-  core_attachment_base(const core_attachment_base&) = delete;
-  core_attachment_base& operator=(const core_attachment_base&) = delete;
+namespace detail {
 
-public:
-  explicit inline core_attachment_base(TBOUNCE_CORE *core) noexcept
-    : previous_core_(static_cast<TBOUNCE_CORE *>(::bounce_get_core())),
-      active_(true) {
-    ::bounce_set_core(nullptr);
-    if (static_cast<TBOUNCE_CORE *>(::bounce_get_core()) == previous_core_) {
-      previous_core_ = nullptr;
-    }
-    ::bounce_set_core(core);
-  }
-  inline core_attachment_base(core_attachment_base&& other) noexcept
-    : previous_core_(other.previous_core_),
-      active_(other.active_) {
-    other.previous_core_ = nullptr;
-    other.active_ = false;
+// Preserve the previous thread-local attachment without treating the
+// process-wide fallback core as if it had been attached locally.
+template<typename TBOUNCE_CORE, typename PARK_FN>
+inline bool park_with_current_core(
+  TBOUNCE_CORE *core,
+  PARK_FN&& park_fn) noexcept {
+  TBOUNCE_CORE *previous_core;
+  bool result;
+
+  if (core == nullptr) {
+    return false;
   }
 
-  inline core_attachment_base& operator=(core_attachment_base&& other) noexcept {
-    if (this != &other) {
-      if (active_) {
-        ::bounce_set_core(previous_core_);
-      }
-      previous_core_ = other.previous_core_;
-      active_ = other.active_;
-      other.previous_core_ = nullptr;
-      other.active_ = false;
-    }
-    return *this;
+  previous_core = static_cast<TBOUNCE_CORE *>(::bounce_get_core());
+  ::bounce_set_core(nullptr);
+  if (static_cast<TBOUNCE_CORE *>(::bounce_get_core()) == previous_core) {
+    previous_core = nullptr;
   }
 
-  inline ~core_attachment_base() noexcept {
-    if (active_) {
-      ::bounce_set_core(previous_core_);
-    }
-  }
-};
+  ::bounce_set_core(core);
+  result = park_fn();
+  ::bounce_set_core(previous_core);
+  return result;
+}
 
-template <typename TBOUNCE_CORE> class bounce_ref_base {
+}
+
+/**
+ * @brief Non-owning bounce reference shared by backend-specific handles.
+ * @tparam TBOUNCE_CORE Backend bounce core storage type.
+ */
+template <typename TBOUNCE_CORE> class bounce_base_ref {
+  template<typename> friend class bounce_base;
+
 private:
   TBOUNCE_CORE *bounce_;
 
 protected:
-  explicit inline bounce_ref_base(TBOUNCE_CORE *bounce) noexcept
+  explicit inline bounce_base_ref(TBOUNCE_CORE *bounce) noexcept
     : bounce_(bounce) {
   }
 
@@ -364,11 +356,13 @@ public:
    * @brief Park current thread and run continuation repeatedly.
    * @return True when succeeded continuation pumps.
    * @remarks The thread will block inside. Release when `shutdown()` called.
+   * While parked through this C++ wrapper, `get_current()` resolves to the
+   * same core on the current thread or task.
    */
   inline bool park() noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park(bounce_, 0u) :
-             false;
+    return detail::park_with_current_core(
+      bounce_,
+      [this]() noexcept { return ::bounce_park(bounce_, 0u); });
   }
 
   /**
@@ -376,24 +370,30 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. While parked through this C++
+   * wrapper, `get_current()` resolves to the same core on the current thread
+   * or task.
    */
   inline bool park(unsigned int max_inline_depth) noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park(bounce_, max_inline_depth) :
-             false;
+    return detail::park_with_current_core(
+      bounce_,
+      [this, max_inline_depth]() noexcept {
+        return ::bounce_park(bounce_, max_inline_depth);
+      });
   }
 
   /**
    * @brief Pump current thread once without waiting for new completion work.
    * @return True when succeeded continuation pumps.
    * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work.
+   * dispatchable and then returns without blocking for future work. While
+   * parked through this C++ wrapper, `get_current()` resolves to the same
+   * core on the current thread or task.
    */
   inline bool park_once() noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park_once(bounce_, 0u) :
-             false;
+    return detail::park_with_current_core(
+      bounce_,
+      [this]() noexcept { return ::bounce_park_once(bounce_, 0u); });
   }
 
   /**
@@ -401,12 +401,16 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. While parked through this C++
+   * wrapper, `get_current()` resolves to the same core on the current thread
+   * or task.
    */
   inline bool park_once(unsigned int max_inline_depth) noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park_once(bounce_, max_inline_depth) :
-             false;
+    return detail::park_with_current_core(
+      bounce_,
+      [this, max_inline_depth]() noexcept {
+        return ::bounce_park_once(bounce_, max_inline_depth);
+      });
   }
 
   /**
@@ -421,6 +425,9 @@ public:
   }
 };
 
+template <typename TBOUNCE_CORE>
+using bounce_ref_base = bounce_base_ref<TBOUNCE_CORE>;
+
 template <typename TBOUNCE_CORE> class bounce_base {
 private:
   template<typename, typename> friend class cancellation_base;
@@ -434,8 +441,6 @@ private:
   bounce_base& operator=(bounce_base&&) = delete;
 
 public:
-  using current_attachment = core_attachment_base<TBOUNCE_CORE>;
-
   /**
    * @brief Get the underlying bounce core storage.
    * @return Backend bounce core pointer.
@@ -446,19 +451,21 @@ public:
 
   /**
    * @brief Get the current thread/task-local or fallback bounce core pointer.
-   * @return Backend bounce core pointer, or `NULL` when neither an attachment
-   * nor a fallback core is available.
+   * @return Backend bounce core pointer, or `NULL` when neither a current
+   * attachment nor a fallback core is available.
    */
   static inline TBOUNCE_CORE *get_current_core() noexcept {
     return static_cast<TBOUNCE_CORE *>(::bounce_get_core());
   }
 
   /**
-   * @brief Attach this bounce core to the current thread/task-local slot.
-   * @return RAII attachment that restores the previous core when destroyed.
+   * @brief Get the current thread/task-local or fallback bounce as a
+   * non-owning reference.
+   * @return Non-owning reference to the current or fallback bounce core. The
+   * returned reference is unbound when neither is available.
    */
-  inline current_attachment attach_current() noexcept {
-    return current_attachment(&bounce_);
+  static inline bounce_base_ref<TBOUNCE_CORE> get_current() noexcept {
+    return bounce_base_ref<TBOUNCE_CORE>(get_current_core());
   }
 
   template<typename COMPLETION_TYPE>
@@ -539,9 +546,13 @@ public:
    * @brief Park current thread and run continuation repeatedly.
    * @return True when succeeded continuation pumps.
    * @remarks The thread will block inside. Release when `shutdown()` called.
+   * While parked through this C++ wrapper, `get_current()` resolves to this
+   * core on the current thread or task.
    */
   inline bool park() noexcept {
-    return ::bounce_park(&bounce_, 0u);
+    return detail::park_with_current_core(
+      &bounce_,
+      [this]() noexcept { return ::bounce_park(&bounce_, 0u); });
   }
 
   /**
@@ -549,20 +560,30 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. While parked through this C++
+   * wrapper, `get_current()` resolves to this core on the current thread or
+   * task.
    */
   inline bool park(unsigned int max_inline_depth) noexcept {
-    return ::bounce_park(&bounce_, max_inline_depth);
+    return detail::park_with_current_core(
+      &bounce_,
+      [this, max_inline_depth]() noexcept {
+        return ::bounce_park(&bounce_, max_inline_depth);
+      });
   }
 
   /**
    * @brief Pump current thread once without waiting for new completion work.
    * @return True when succeeded continuation pumps.
    * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work.
+   * dispatchable and then returns without blocking for future work. While
+   * parked through this C++ wrapper, `get_current()` resolves to this core on
+   * the current thread or task.
    */
   inline bool park_once() noexcept {
-    return ::bounce_park_once(&bounce_, 0u);
+    return detail::park_with_current_core(
+      &bounce_,
+      [this]() noexcept { return ::bounce_park_once(&bounce_, 0u); });
   }
 
   /**
@@ -570,10 +591,16 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. While parked through this C++
+   * wrapper, `get_current()` resolves to this core on the current thread or
+   * task.
    */
   inline bool park_once(unsigned int max_inline_depth) noexcept {
-    return ::bounce_park_once(&bounce_, max_inline_depth);
+    return detail::park_with_current_core(
+      &bounce_,
+      [this, max_inline_depth]() noexcept {
+        return ::bounce_park_once(&bounce_, max_inline_depth);
+      });
   }
 
   /**

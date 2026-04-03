@@ -261,9 +261,6 @@ TEST_CPP_RUNTIME_EXECUTOR_ID test_cpp_runtime_start_parker_ex(
     context->parker_executor = TEST_CPP_RUNTIME_EXECUTOR_ID{};
   }
   context->thread = std::thread([bounce_instance, context]() {
-    auto attachment = bounce_instance->attach_current();
-
-    (void)attachment;
     test_cpp_runtime_mark_started(context);
     test_cpp_runtime_mark_finished(
       context,
