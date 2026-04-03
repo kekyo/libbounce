@@ -708,6 +708,70 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 
 ---
 
+## 各プラットフォーム毎の注意点
+
+### POSIX+GLib
+
+GTK など、既に GLib main loop を持っているアプリケーションで
+libbounce の POSIX+GLib backend を使う場合は、その既存の
+`GMainContext` を `bounce` 側へ渡して初期化し、
+`gtk_main()` を別に回さず `bounce_park()` を唯一の待機ループにします。
+
+C API では
+`bounce_init_with_main_context(&bounce, g_main_context_default())`
+を使い、C++ ヘルパーでは
+`libbounce::bounce bounce(g_main_context_default())`
+を使います。
+`NULL` を渡した場合は従来どおり private な `GMainContext` を生成します。
+
+重要なのは、GUI スレッドでブロッキングするのは `bounce_park()` だけにすることです。
+`gtk_main()` を別に呼ぶと、GTK と libbounce が別々の dispatch loop を回すことになります。
+
+以下は、GTK3 と一緒に使う場合の簡略化した `main()` の形です。
+
+```cpp
+#include <gtk/gtk.h>
+#include <libbounce/posix_glib.h>
+
+static void on_destroy(GtkWidget *widget, gpointer user_data) {
+  auto *bounce = static_cast<libbounce::bounce *>(user_data);
+
+  (void)widget;
+  bounce->shutdown();
+}
+
+int main(int argc, char **argv) {
+  gtk_init(&argc, &argv);
+
+  libbounce::bounce bounce(g_main_context_default());
+  GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+
+  gtk_window_set_title(GTK_WINDOW(window), "example");
+  g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), &bounce);
+  gtk_widget_show_all(window);
+
+  auto attachment = bounce.attach_current();
+
+  (void)attachment;
+  (void)bounce.park();
+  return 0;
+}
+```
+
+C API だけを使う場合の初期化は次の通りです。
+
+```c
+gtk_init(&argc, &argv);
+BOUNCE_CORE bounce;
+bounce_init_with_main_context(&bounce, g_main_context_default());
+```
+
+callback や helper から `bounce_get_core()` が必要なら、
+`bounce_park()` へ入る前に `bounce_set_core()` または
+C++ の `attach_current()` を使って current core を公開してください。
+
+---
+
 ## パッケージ生成
 
 `libbounce` には、`libdispatcher` と同様の流れで配布物を生成する `build_pack.sh` が含まれます。

@@ -474,6 +474,11 @@ public:
   }
 
 protected:
+  template<typename INIT_FN>
+  explicit inline bounce_base(INIT_FN&& init) noexcept {
+    init(&bounce_);
+  }
+
   inline bounce_base() noexcept {
     ::bounce_init(&bounce_);
   }

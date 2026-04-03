@@ -146,6 +146,19 @@ struct BOUNCE_CORE {
 //////////////////////////////////////////////////////////////////////////////////
 
 /**
+ * @brief Initialize the GLib backend with an explicit `GMainContext`.
+ * @param r BOUNCE_CORE structure space provided by the caller.
+ * @param main_context GLib main context to drive from `bounce_park()`, or
+ * `NULL` to create a private context like `bounce_init()`.
+ * @remarks When a non-NULL context is provided, libbounce keeps a reference to
+ * it for the lifetime of the core and releases that reference during
+ * `bounce_deinit()`.
+ */
+extern void bounce_init_with_main_context(
+  BOUNCE_CORE *r,
+  GMainContext *main_context);
+
+/**
  * @brief Await GLib-integrated file-descriptor readiness through `GSource`.
  * @param r Initialized BOUNCE_CORE.
  * @param fd File descriptor watched by GLib main-context polling.
@@ -271,6 +284,18 @@ public:
    * @brief Initialize the bounce.
    */
   inline bounce(): bounce_base() {
+  }
+
+  /**
+   * @brief Initialize the bounce on a caller-provided GLib main context.
+   * @param main_context GLib main context to drive from `park()`, or `NULL` to
+   * create a private context like the default constructor.
+   */
+  explicit inline bounce(GMainContext *main_context) noexcept
+    : bounce_base(
+        [main_context](BOUNCE_CORE *core) noexcept {
+          ::bounce_init_with_main_context(core, main_context);
+        }) {
   }
 
   /**

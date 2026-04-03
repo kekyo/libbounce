@@ -40,6 +40,7 @@ extern void test_cpp_wrapper_current_post_runs_on_attached_parker(void);
 extern void test_cpp_wrapper_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_aborts_on_deinit(void);
+extern void test_posix_glib_gtk3_example_button_click_writes_sample_file(void);
 
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
 extern void test_cpp_promise_resume_on_runs(void);
@@ -111,6 +112,11 @@ typedef struct TEST_INLINE_POST_CONTEXT {
   TEST_COMPLETION_CONTEXT nested;
   volatile unsigned int next_order;
 } TEST_INLINE_POST_CONTEXT;
+
+typedef struct TEST_EXTERNAL_CONTEXT_STATE {
+  BOUNCE_CORE *bounce;
+  bool fired;
+} TEST_EXTERNAL_CONTEXT_STATE;
 
 static struct timespec test_deadline_after_ms(unsigned int timeout_ms) {
   struct timespec timeout;
@@ -424,6 +430,14 @@ static void test_timeout_nested_post_completion(
   test_completion_callback(result, &context->outer);
 }
 
+static gboolean test_external_context_source_fired(gpointer parameter) {
+  TEST_EXTERNAL_CONTEXT_STATE *state = parameter;
+
+  state->fired = true;
+  bounce_shutdown(state->bounce);
+  return G_SOURCE_REMOVE;
+}
+
 static double test_run_inline_depth_benchmark(unsigned int max_inline_depth) {
   BOUNCE_CORE bounce;
   TEST_PARK_THREAD_CONTEXT park_context;
@@ -467,6 +481,32 @@ static void test_shutdown_stops_parker(void) {
   test_start_parker(&bounce, &park_context);
   test_stop_parker(&bounce, &park_context);
   bounce_deinit(&bounce);
+}
+
+static void test_init_with_main_context_uses_provided_context(void) {
+  BOUNCE_CORE bounce;
+  GMainContext *main_context = g_main_context_new();
+  GSource *source;
+  TEST_EXTERNAL_CONTEXT_STATE state;
+
+  ASSERT_TRUE(main_context != NULL);
+  memset(&state, 0, sizeof state);
+  state.bounce = &bounce;
+
+  bounce_init_with_main_context(&bounce, main_context);
+  ASSERT_TRUE(bounce.main_context == main_context);
+
+  source = g_idle_source_new();
+  ASSERT_TRUE(source != NULL);
+  g_source_set_callback(source, test_external_context_source_fired, &state, NULL);
+  ASSERT_TRUE(g_source_attach(source, main_context) != 0u);
+  g_source_unref(source);
+
+  ASSERT_TRUE(bounce_park(&bounce, 0u));
+  ASSERT_TRUE(state.fired);
+
+  bounce_deinit(&bounce);
+  g_main_context_unref(main_context);
 }
 
 static void test_single_post_runs(void) {
@@ -1318,6 +1358,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_tls_current_core_uses_fallback_when_unattached),
     TEST_CASE_ENTRY(test_tls_current_core_visible_on_attached_parker),
     TEST_CASE_ENTRY(test_shutdown_stops_parker),
+    TEST_CASE_ENTRY(test_init_with_main_context_uses_provided_context),
     TEST_CASE_ENTRY(test_single_post_runs),
     TEST_CASE_ENTRY(test_park_once_post_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_post_runs),
@@ -1342,6 +1383,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_aborts_on_deinit),
+    TEST_CASE_ENTRY(test_posix_glib_gtk3_example_button_click_writes_sample_file),
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
     TEST_CASE_ENTRY(test_cpp_promise_resume_on_runs),
     TEST_CASE_ENTRY(test_cpp_promise_make_awaitable_runs),

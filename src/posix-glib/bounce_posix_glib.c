@@ -548,11 +548,9 @@ static inline GSource *bounce_posix_glib_abort_pending_item_locked(
   return source;
 }
 
-/**
- * @brief Initialize the bounce.
- * @param r BOUNCE_CORE structure space provided by the caller.
- */
-void bounce_init(BOUNCE_CORE *r) {
+static void bounce_posix_glib_init_core(
+  BOUNCE_CORE *r,
+  GMainContext *main_context) {
   BOUNCE_POSIX_GLIB_READY_SOURCE *ready_source;
 
   if (r == NULL) {
@@ -564,7 +562,10 @@ void bounce_init(BOUNCE_CORE *r) {
   bounce_queue_init(&r->ready_queue);
   bounce_stack_init(&r->free_items);
   bounce_dynamic_block_list_init(&r->dynamic_completion_blocks);
-  r->main_context = g_main_context_new();
+  r->main_context =
+    (main_context != NULL) ?
+      g_main_context_ref(main_context) :
+      g_main_context_new();
 
   for (size_t index = 0u; index < BOUNCE_MAX_STATIC_COMPLETION_ITEMS; index++) {
     bounce_posix_glib_init_free_item(&r->static_completion_items[index]);
@@ -588,6 +589,26 @@ void bounce_init(BOUNCE_CORE *r) {
   g_source_set_priority(&ready_source->source, G_PRIORITY_HIGH);
   (void)g_source_attach(&ready_source->source, r->main_context);
   r->ready_source = &ready_source->source;
+}
+
+/**
+ * @brief Initialize the bounce.
+ * @param r BOUNCE_CORE structure space provided by the caller.
+ */
+void bounce_init(BOUNCE_CORE *r) {
+  bounce_posix_glib_init_core(r, NULL);
+}
+
+/**
+ * @brief Initialize the GLib backend with an explicit `GMainContext`.
+ * @param r BOUNCE_CORE structure space provided by the caller.
+ * @param main_context GLib main context to drive from `bounce_park()`, or
+ * `NULL` to create a private context like `bounce_init()`.
+ */
+void bounce_init_with_main_context(
+  BOUNCE_CORE *r,
+  GMainContext *main_context) {
+  bounce_posix_glib_init_core(r, main_context);
 }
 
 /**

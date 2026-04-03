@@ -779,6 +779,70 @@ destroying a started but unfinished promise is a programming error.
 
 ---
 
+## Platform Notes
+
+### POSIX+GLib
+
+When you use libbounce together with GTK or another framework that already
+drives a GLib main loop, initialize the POSIX+GLib backend with that existing
+`GMainContext` and then call `bounce_park()` instead of starting a separate
+`gtk_main()` loop.
+
+Use `bounce_init_with_main_context(&bounce, g_main_context_default())` for the
+C API, or `libbounce::bounce bounce(g_main_context_default())` for the C++
+helper.
+Passing `NULL` still keeps the old behavior and creates a private
+`GMainContext`.
+
+The important point is that `bounce_park()` becomes the single blocking loop on
+the GUI thread.
+If you call `gtk_main()` separately, GTK and libbounce end up driving different
+dispatch loops.
+
+The following simplified GTK3 `main()` shows the intended shape:
+
+```cpp
+#include <gtk/gtk.h>
+#include <libbounce/posix_glib.h>
+
+static void on_destroy(GtkWidget *widget, gpointer user_data) {
+  auto *bounce = static_cast<libbounce::bounce *>(user_data);
+
+  (void)widget;
+  bounce->shutdown();
+}
+
+int main(int argc, char **argv) {
+  gtk_init(&argc, &argv);
+
+  libbounce::bounce bounce(g_main_context_default());
+  GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+
+  gtk_window_set_title(GTK_WINDOW(window), "example");
+  g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), &bounce);
+  gtk_widget_show_all(window);
+
+  auto attachment = bounce.attach_current();
+
+  (void)attachment;
+  (void)bounce.park();
+  return 0;
+}
+```
+
+The equivalent C initialization is:
+
+```c
+gtk_init(&argc, &argv);
+BOUNCE_CORE bounce;
+bounce_init_with_main_context(&bounce, g_main_context_default());
+```
+
+If callbacks or helpers need `bounce_get_core()`, call `bounce_set_core()` or
+use the C++ `attach_current()` helper before entering `bounce_park()`.
+
+---
+
 ## Packaging
 
 `libbounce` also provides a packaging script modeled after the `libdispatcher` workflow.
