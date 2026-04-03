@@ -133,6 +133,7 @@ struct BOUNCE_TIMER {
 struct BOUNCE_CORE {
   pthread_mutex_t lock;
   volatile int shutting_down;
+  volatile int shutdown_wait_for_idle;
   unsigned int active_watch_count;
   GMainContext *main_context;
   GSource *ready_source;

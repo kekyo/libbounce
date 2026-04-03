@@ -76,6 +76,38 @@ static inline bool bounce_freertos_dispatch_next_ready(
   return true;
 }
 
+static inline bool bounce_freertos_has_pending_waits_locked(BOUNCE_CORE *r) {
+  BOUNCE_DYNAMIC_BLOCK *block;
+
+  for (size_t index = 0u; index < BOUNCE_MAX_STATIC_COMPLETION_ITEMS; index++) {
+    if (r->static_completion_items[index].state ==
+        BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+      return true;
+    }
+  }
+
+  block = r->dynamic_item_blocks.head;
+  while (block != NULL) {
+    BOUNCE_COMPLETION_ITEM *items =
+      (BOUNCE_COMPLETION_ITEM *)bounce_dynamic_block_const_items(block);
+
+    for (size_t index = 0u; index < block->item_count; index++) {
+      if (items[index].state == BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+        return true;
+      }
+    }
+    block = block->next;
+  }
+  return false;
+}
+
+static inline bool bounce_freertos_should_exit_locked(BOUNCE_CORE *r) {
+  return (r->shutting_down != 0) &&
+         (r->ready_queue.head == NULL) &&
+         ((r->shutdown_wait_for_idle == 0) ||
+          !bounce_freertos_has_pending_waits_locked(r));
+}
+
 static inline void bounce_freertos_abort_pending_item_locked(
   BOUNCE_COMPLETION_ITEM *item,
   BOUNCE_QUEUE *abort_queue) {
@@ -226,9 +258,7 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
     }
 
     bounce_freertos_critical_enter(&critical_context, false);
-    should_return =
-      (r->shutting_down != 0) &&
-      (r->ready_queue.head == NULL);
+    should_return = bounce_freertos_should_exit_locked(r);
     bounce_freertos_critical_exit(&critical_context);
     if (should_return) {
       break;
@@ -501,8 +531,9 @@ void bounce_freertos_condition_raise_from_isr(
  * @brief Shutdown parking threads.
  * @param r Initialized BOUNCE_CORE.
  */
-void bounce_shutdown(BOUNCE_CORE *r) {
+void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle) {
   BOUNCE_FREERTOS_CRITICAL_CONTEXT critical_context;
+  bool shutdown_fd_backend = false;
 
   if (r == NULL) {
     return;
@@ -510,11 +541,19 @@ void bounce_shutdown(BOUNCE_CORE *r) {
 
   bounce_freertos_critical_enter(&critical_context, false);
   r->shutting_down = 1;
+  if (wait_for_idle) {
+    r->shutdown_wait_for_idle = 1;
+  } else {
+    r->shutdown_wait_for_idle = 0;
+    shutdown_fd_backend = true;
+  }
   bounce_freertos_critical_exit(&critical_context);
 
   bounce_freertos_signal_parkers(r);
 #if defined(ESP_PLATFORM) && defined(BOUNCE_FREERTOS_ENABLE_FD_AWAIT)
-  bounce_freertos_fd_backend_shutdown(r);
+  if (shutdown_fd_backend) {
+    bounce_freertos_fd_backend_shutdown(r);
+  }
 #endif
 }
 
@@ -531,7 +570,7 @@ void bounce_deinit(BOUNCE_CORE *r) {
     return;
   }
 
-  bounce_shutdown(r);
+  bounce_shutdown(r, false);
   bounce_queue_init(&abort_queue);
 
 #if defined(ESP_PLATFORM) && defined(BOUNCE_FREERTOS_ENABLE_FD_AWAIT)

@@ -33,7 +33,7 @@ void app_main(void) {
   (void)g_buildcheck_completion;
   (void)g_buildcheck_fd_events;
 
-  bounce_shutdown(&g_bounce);
+  bounce_shutdown(&g_bounce, false);
   bounce_timer_deinit(&g_timer);
   bounce_deinit(&g_bounce);
 }

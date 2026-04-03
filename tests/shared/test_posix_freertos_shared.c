@@ -31,6 +31,7 @@ extern void test_cpp_wrapper_registration_completes_canceled(void);
 extern void test_cpp_wrapper_registration_lambda_completes_canceled(void);
 extern void test_cpp_wrapper_registration_unregister_prevents_callback(void);
 extern void test_cpp_wrapper_registration_precanceled_completes_canceled(void);
+extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void);
 extern void test_cpp_wrapper_park_once_post_runs(void);
 extern void test_cpp_wrapper_attach_current_timeout_await_runs(void);
 extern void test_cpp_wrapper_attach_current_restores_fallback_view(void);
@@ -1421,6 +1422,93 @@ static void test_register_canceled_with_already_canceled_source_completes_cancel
   bounce_deinit(&bounce);
 }
 
+static void test_shutdown_without_wait_for_idle_returns_before_registration_settles(void) {
+  BOUNCE_CORE bounce;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  BOUNCE_CANCELLATION cancellation;
+  BOUNCE_CANCELLATION_REGISTRATION registration;
+
+  bounce_init(&bounce);
+  bounce_cancellation_init(&cancellation);
+  bounce_cancellation_registration_init(&registration);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_register_canceled(
+    &bounce,
+    &cancellation,
+    &registration,
+    test_completion_callback,
+    &completion_context));
+
+  bounce_shutdown(&bounce, false);
+  ASSERT_TRUE(
+    test_posix_freertos_runtime_signal_wait(
+      &park_context.finished_signal,
+      TEST_TIMEOUT_MS));
+  ASSERT_TRUE(test_atomic_load_uint(&park_context.finished) != 0u);
+  ASSERT_TRUE(test_atomic_load_uint(&park_context.park_result) != 0u);
+  test_wait_no_additional_completion(&completion_context, 0u);
+  ASSERT_TRUE(test_completion_call_count(&completion_context) == 0u);
+
+  ASSERT_TRUE(test_posix_freertos_runtime_stop_parker(&bounce, &park_context, TEST_TIMEOUT_MS));
+  bounce_deinit(&bounce);
+
+  ASSERT_TRUE(test_completion_call_count(&completion_context) == 1u);
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_ABORTED);
+  ASSERT_TRUE(test_posix_freertos_runtime_completion_ran_on_current_executor(&completion_context));
+
+  test_completion_context_destroy(&completion_context);
+  bounce_cancellation_registration_deinit(&registration);
+  bounce_cancellation_deinit(&cancellation);
+}
+
+static void test_shutdown_wait_for_idle_waits_for_registration_settle(void) {
+  BOUNCE_CORE bounce;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  BOUNCE_CANCELLATION cancellation;
+  BOUNCE_CANCELLATION_REGISTRATION registration;
+
+  bounce_init(&bounce);
+  bounce_cancellation_init(&cancellation);
+  bounce_cancellation_registration_init(&registration);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_register_canceled(
+    &bounce,
+    &cancellation,
+    &registration,
+    test_completion_callback,
+    &completion_context));
+
+  bounce_shutdown(&bounce, true);
+  ASSERT_TRUE(
+    !test_posix_freertos_runtime_signal_wait(
+      &park_context.finished_signal,
+      TEST_NO_COMPLETION_TIMEOUT_MS));
+  ASSERT_TRUE(test_atomic_load_uint(&park_context.finished) == 0u);
+  ASSERT_TRUE(test_completion_call_count(&completion_context) == 0u);
+
+  bounce_cancel(&bounce, &cancellation);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(test_completion_call_count(&completion_context) == 1u);
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(test_posix_freertos_runtime_completion_ran_on_parker(
+    &completion_context,
+    &park_context));
+  ASSERT_TRUE(!bounce_unregister_canceled(&registration));
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_registration_deinit(&registration);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_deinit(&bounce);
+}
+
 static void test_unregister_canceled_prevents_callback(void) {
   BOUNCE_CORE bounce;
   TEST_PARK_THREAD_CONTEXT park_context;
@@ -1920,6 +2008,7 @@ int test_run_posix_freertos_shared_suite(
   TEST_APPEND_CASE(test_cpp_wrapper_registration_lambda_completes_canceled);
   TEST_APPEND_CASE(test_cpp_wrapper_registration_unregister_prevents_callback);
   TEST_APPEND_CASE(test_cpp_wrapper_registration_precanceled_completes_canceled);
+  TEST_APPEND_CASE(test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive);
   TEST_APPEND_CASE(test_cpp_wrapper_condition_await_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_condition_await_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_condition_await_aborts_on_deinit);
@@ -1972,6 +2061,8 @@ int test_run_posix_freertos_shared_suite(
   TEST_APPEND_CASE(test_multi_parker_condition_stress);
   TEST_APPEND_CASE(test_register_canceled_completes_canceled);
   TEST_APPEND_CASE(test_register_canceled_with_already_canceled_source_completes_canceled);
+  TEST_APPEND_CASE(test_shutdown_without_wait_for_idle_returns_before_registration_settles);
+  TEST_APPEND_CASE(test_shutdown_wait_for_idle_waits_for_registration_settle);
   TEST_APPEND_CASE(test_unregister_canceled_prevents_callback);
   TEST_APPEND_CASE(test_registration_deinit_aborts_pending_callback);
   TEST_APPEND_CASE(test_condition_await_cancel_completes_canceled);

@@ -27,6 +27,7 @@ extern void test_cpp_wrapper_registration_completes_canceled(void);
 extern void test_cpp_wrapper_registration_lambda_completes_canceled(void);
 extern void test_cpp_wrapper_registration_unregister_prevents_callback(void);
 extern void test_cpp_wrapper_registration_precanceled_completes_canceled(void);
+extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void);
 extern void test_cpp_wrapper_park_once_post_runs(void);
 extern void test_cpp_wrapper_attach_current_timeout_await_runs(void);
 extern void test_cpp_wrapper_attach_current_restores_fallback_view(void);
@@ -444,7 +445,7 @@ static void test_park_pumps_window_messages(void) {
     WaitForSingleObject(context.message_handled_event, TEST_TIMEOUT_MS) ==
     WAIT_OBJECT_0);
 
-  bounce_shutdown(&bounce);
+  bounce_shutdown(&bounce, false);
   ASSERT_TRUE(WaitForSingleObject(thread_handle, TEST_TIMEOUT_MS) == WAIT_OBJECT_0);
   ASSERT_TRUE(GetExitCodeThread(thread_handle, &exit_code) != 0);
   ASSERT_TRUE(exit_code == 0u);
@@ -580,7 +581,7 @@ static void test_stop_parkers(
   TEST_PARK_THREAD_CONTEXT *contexts,
   HANDLE *thread_handles,
   DWORD thread_count) {
-  bounce_shutdown(bounce);
+  bounce_shutdown(bounce, false);
   for (DWORD index = 0; index < thread_count; index++) {
     DWORD exit_code;
 
@@ -1645,6 +1646,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_lambda_completes_canceled),
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_unregister_prevents_callback),
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_precanceled_completes_canceled),
+    TEST_CASE_ENTRY(test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_nested_post_inlines),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit),
     TEST_CASE_ENTRY(test_cpp_wrapper_current_post_runs_on_attached_parker),

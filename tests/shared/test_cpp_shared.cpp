@@ -238,6 +238,39 @@ static void test_stop_parker(
       TEST_TIMEOUT_MS));
 }
 
+static bool test_cpp_runtime_parker_finished_now(
+  const TEST_PARK_THREAD_CONTEXT *context) {
+#if defined(BOUNCE_FREERTOS)
+  return __atomic_load_n(&context->finished, __ATOMIC_ACQUIRE) != 0u;
+#elif defined(_WIN32)
+  bool finished;
+
+  EnterCriticalSection(
+    const_cast<LPCRITICAL_SECTION>(&context->mutex));
+  finished = context->finished;
+  LeaveCriticalSection(
+    const_cast<LPCRITICAL_SECTION>(&context->mutex));
+  return finished;
+#else
+  std::lock_guard<std::mutex> lock(context->mutex);
+  return context->finished;
+#endif
+}
+
+static bool test_wait_for_parker_finished(
+  const TEST_PARK_THREAD_CONTEXT *context,
+  unsigned int timeout_ms) {
+  const double deadline_ms = test_cpp_monotonic_now_ms() + (double)timeout_ms;
+
+  while (!test_cpp_runtime_parker_finished_now(context)) {
+    if (test_cpp_monotonic_now_ms() >= deadline_ms) {
+      return false;
+    }
+    test_cpp_yield_park_once_poll();
+  }
+  return true;
+}
+
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static void test_open_pipe(int *pipe_fds) {
   ASSERT_TRUE(pipe(pipe_fds) == 0);
@@ -933,6 +966,71 @@ extern "C" void test_cpp_wrapper_registration_precanceled_completes_canceled(voi
   ASSERT_TRUE(!registration.unregister());
 
   test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void) {
+  {
+    TEST_COMPLETION_CONTEXT completion_context;
+
+    test_completion_context_init(&completion_context);
+    {
+      libbounce::cancellation_registration registration;
+      libbounce::cancellation cancellation;
+      libbounce::bounce bounce_instance;
+      TEST_PARK_THREAD_CONTEXT park_context;
+
+      test_start_parker(&bounce_instance, &park_context);
+      ASSERT_TRUE(
+        registration.register_canceled(
+          bounce_instance,
+          cancellation,
+          test_cpp_completion_callback,
+          &completion_context));
+
+      bounce_instance.shutdown(false);
+      ASSERT_TRUE(test_wait_for_parker_finished(&park_context, TEST_TIMEOUT_MS));
+      test_wait_no_additional_completion(&completion_context, 0u);
+      ASSERT_TRUE(test_cpp_runtime_completion_call_count(&completion_context) == 0u);
+
+      test_stop_parker(&bounce_instance, &park_context);
+    }
+
+    test_wait_completion_count(&completion_context, 1u);
+    test_assert_completion_on_current_executor(
+      &completion_context,
+      BOUNCE_COMPLETION_ABORTED);
+  }
+
+  {
+    libbounce::cancellation_registration registration;
+    libbounce::cancellation cancellation;
+    libbounce::bounce bounce_instance;
+    TEST_PARK_THREAD_CONTEXT park_context;
+    TEST_COMPLETION_CONTEXT completion_context;
+
+    test_completion_context_init(&completion_context);
+    test_start_parker(&bounce_instance, &park_context);
+    ASSERT_TRUE(
+      registration.register_canceled(
+        bounce_instance,
+        cancellation,
+        test_cpp_completion_callback,
+        &completion_context));
+
+    bounce_instance.shutdown(true);
+    ASSERT_TRUE(!test_wait_for_parker_finished(&park_context, TEST_TIMEOUT_MS / 10u));
+    ASSERT_TRUE(test_cpp_runtime_completion_call_count(&completion_context) == 0u);
+
+    cancellation.cancel(bounce_instance);
+    test_wait_completion_count(&completion_context, 1u);
+    test_assert_completion_on_parker(
+      &completion_context,
+      &park_context,
+      BOUNCE_COMPLETION_CANCELED);
+    ASSERT_TRUE(!registration.unregister());
+
+    test_stop_parker(&bounce_instance, &park_context);
+  }
 }
 
 extern "C" void test_cpp_wrapper_lambda_post_runs(void) {

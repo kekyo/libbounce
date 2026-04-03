@@ -222,8 +222,8 @@ static LRESULT CALLBACK example_window_proc(
 
     case WM_CLOSE:
       if (app != nullptr) {
-        // Closing the native window comes first, then `shutdown()` wakes the
-        // parker so `run()` can leave `bounce.park()` and exit.
+        // Closing the native window comes first, then `shutdown()` asks the
+        // parker to leave only after any in-flight bounce wait has settled.
         (void)DestroyWindow(window_handle);
         app->bounce.shutdown();
         return 0;
@@ -318,13 +318,6 @@ int run(HINSTANCE instance, int show_command) noexcept {
     // The GUI thread itself becomes the parker. The Win32 backend pumps both
     // bounce-ready work and the window message queue until shutdown is posted.
     (void)app.bounce.park();
-  }
-
-  // Drain an in-flight write that was aborted by shutdown before destroying
-  // the coroutine frame.
-  while (app.write_operation && !app.write_operation.done()) {
-    (void)app.bounce.park_once();
-    Sleep(0u);
   }
 
   return 0;

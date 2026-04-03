@@ -108,8 +108,11 @@ extern bool bounce_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth);
 /**
  * @brief Shutdown parking threads.
  * @param r Initialized BOUNCE_CORE.
+ * @param wait_for_idle When true, parked threads or tasks keep running until
+ * all already-pending wait operations settle. When false, they may leave even
+ * while wait operations are still pending.
  */
-extern void bounce_shutdown(BOUNCE_CORE *r);
+extern void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle);
 
 /**
  * @brief Deinitialize the bounce.
@@ -408,10 +411,12 @@ public:
 
   /**
    * @brief Shutdown parking threads.
+   * @param wait_for_idle When true, keep parking until already-pending wait
+   * operations settle. Defaults to true.
    */
-  inline void shutdown() noexcept {
+  inline void shutdown(bool wait_for_idle = true) noexcept {
     if (bounce_ != nullptr) {
-      ::bounce_shutdown(bounce_);
+      ::bounce_shutdown(bounce_, wait_for_idle);
     }
   }
 };
@@ -573,9 +578,11 @@ public:
 
   /**
    * @brief Shutdown parking threads.
+   * @param wait_for_idle When true, keep parking until already-pending wait
+   * operations settle. Defaults to true.
    */
-  inline void shutdown() noexcept {
-    ::bounce_shutdown(&bounce_);
+  inline void shutdown(bool wait_for_idle = true) noexcept {
+    ::bounce_shutdown(&bounce_, wait_for_idle);
   }
 };
 

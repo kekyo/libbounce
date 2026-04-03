@@ -114,6 +114,7 @@ struct BOUNCE_CORE {
   HANDLE shutdown_event;
   HANDLE wake_semaphore;
   volatile LONG shutting_down;
+  volatile LONG shutdown_wait_for_idle;
   BOUNCE_QUEUE ready_queue;
   BOUNCE_STACK free_items;
   BOUNCE_DYNAMIC_BLOCK_LIST dynamic_completion_blocks;

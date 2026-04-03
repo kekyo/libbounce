@@ -175,6 +175,7 @@ struct BOUNCE_CORE {
   pthread_mutex_t lock;
   pthread_cond_t parkers_cond;
   volatile int shutting_down;
+  volatile int shutdown_wait_for_idle;
   BOUNCE_QUEUE ready_queue;
   BOUNCE_STACK free_items;
   BOUNCE_DYNAMIC_BLOCK_LIST dynamic_completion_blocks;

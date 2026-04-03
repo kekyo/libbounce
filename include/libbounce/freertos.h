@@ -233,6 +233,7 @@ typedef struct __BOUNCE_FREERTOS_FD_BACKEND {
  */
 struct BOUNCE_CORE {
   volatile int shutting_down;
+  volatile int shutdown_wait_for_idle;
   BOUNCE_QUEUE ready_queue;
   BOUNCE_STACK free_items;
   BOUNCE_DYNAMIC_BLOCK_LIST dynamic_item_blocks;

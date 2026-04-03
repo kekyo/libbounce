@@ -212,6 +212,7 @@ struct BOUNCE_TIMER {
 struct BOUNCE_CORE {
   __BOUNCE_GENERIC_SPINLOCK lock;
   volatile int shutting_down;
+  volatile int shutdown_wait_for_idle;
   volatile int parker_active;
   BOUNCE_QUEUE ready_queue;
   BOUNCE_STACK free_items;

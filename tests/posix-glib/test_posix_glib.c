@@ -30,6 +30,7 @@ extern void test_cpp_wrapper_registration_completes_canceled(void);
 extern void test_cpp_wrapper_registration_lambda_completes_canceled(void);
 extern void test_cpp_wrapper_registration_unregister_prevents_callback(void);
 extern void test_cpp_wrapper_registration_precanceled_completes_canceled(void);
+extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void);
 extern void test_cpp_wrapper_park_once_post_runs(void);
 extern void test_cpp_wrapper_attach_current_timeout_await_runs(void);
 extern void test_cpp_wrapper_attach_current_restores_fallback_view(void);
@@ -309,7 +310,7 @@ static void test_start_parker_with_inline_depth(
 static void test_stop_parker(
   BOUNCE_CORE *bounce,
   TEST_PARK_THREAD_CONTEXT *context) {
-  bounce_shutdown(bounce);
+  bounce_shutdown(bounce, false);
   ASSERT_TRUE(pthread_join(context->thread, NULL) == 0);
   ASSERT_TRUE(context->park_result);
   test_park_context_destroy(context);
@@ -434,7 +435,7 @@ static gboolean test_external_context_source_fired(gpointer parameter) {
   TEST_EXTERNAL_CONTEXT_STATE *state = parameter;
 
   state->fired = true;
-  bounce_shutdown(state->bounce);
+  bounce_shutdown(state->bounce, false);
   return G_SOURCE_REMOVE;
 }
 
@@ -1377,6 +1378,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_lambda_completes_canceled),
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_unregister_prevents_callback),
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_precanceled_completes_canceled),
+    TEST_CASE_ENTRY(test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_nested_post_inlines),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit),
     TEST_CASE_ENTRY(test_cpp_wrapper_current_post_runs_on_attached_parker),

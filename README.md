@@ -231,7 +231,7 @@ int main(void) {
   /* ------------------------------------- */
 
   /* Start shutting down libbounce */
-  bounce_shutdown(&bounce);
+  bounce_shutdown(&bounce, false);
 
   /* ... wait for the parker thread to exit ... */
 
@@ -246,7 +246,7 @@ The basic lifecycle is as follows.
 1. Initialize the core with `bounce_init()`.
 2. Start `bounce_park()` on one or more threads or tasks.
 3. Register `bounce_post()` or await APIs from other contexts.
-4. Call `bounce_shutdown()` when stopping so parkers can exit.
+4. Call `bounce_shutdown(..., false)` when stopping so parkers can exit.
 5. Call `bounce_deinit()` only after confirming that all parkers have finished.
 
 `bounce_park()` keeps waiting internally until a shutdown request arrives.
@@ -333,6 +333,8 @@ If you want to stop an individual wait request before it completes, use
 `BOUNCE_CANCELLATION` instead of `bounce_shutdown()`.
 `bounce_shutdown()` requests that all parkers stop and is the operation for
 winding down the entire library.
+Pass `wait_for_idle=true` when you want parked threads or tasks to keep
+draining already-pending wait operations before they leave.
 Cancellation is for cases where you want to withdraw only one wait.
 
 Use it as follows.
@@ -616,7 +618,7 @@ backend.
 |`bounce_post()`|Push a continuation onto the ready queue so it runs on a parker|
 |`bounce_park()`|Park the current thread or task as a parker|
 |`bounce_park_once()`|Run only the continuations that are dispatchable right now, once, then return|
-|`bounce_shutdown()`|Request all parkers to stop|
+|`bounce_shutdown()`|Request all parkers to stop, optionally after pending waits settle|
 |`bounce_set_core()` / `bounce_get_core()` / `bounce_set_fallback_core()`|Publish and read the core for the current thread or task, with an optional process-wide fallback|
 |`bounce_cancellation_*()`|Initialize, issue, and destroy a cancellation source|
 |`bounce_register_canceled()` / `bounce_unregister_canceled()`|Register and unregister a continuation that runs on cancellation|

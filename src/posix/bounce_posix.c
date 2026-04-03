@@ -293,6 +293,38 @@ static inline void bounce_posix_queue_ready_locked(
   bounce_queue_enqueue(&r->ready_queue, &item->ready_or_free_link);
 }
 
+static inline bool bounce_posix_has_pending_waits_locked(BOUNCE_CORE *r) {
+  BOUNCE_DYNAMIC_BLOCK *block;
+
+  for (size_t index = 0u; index < BOUNCE_MAX_STATIC_COMPLETION_ITEMS; index++) {
+    if (r->static_completion_items[index].state ==
+        BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+      return true;
+    }
+  }
+
+  block = r->dynamic_completion_blocks.head;
+  while (block != NULL) {
+    __BOUNCE_COMPLETION_ITEM *items =
+      (__BOUNCE_COMPLETION_ITEM *)bounce_dynamic_block_const_items(block);
+
+    for (size_t index = 0u; index < block->item_count; index++) {
+      if (items[index].state == BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+        return true;
+      }
+    }
+    block = block->next;
+  }
+  return false;
+}
+
+static inline bool bounce_posix_should_exit_locked(BOUNCE_CORE *r) {
+  return (r->shutting_down != 0) &&
+         (r->ready_queue.head == NULL) &&
+         ((r->shutdown_wait_for_idle == 0) ||
+          !bounce_posix_has_pending_waits_locked(r));
+}
+
 static inline bool bounce_posix_can_inline_locked(BOUNCE_CORE *r) {
   BOUNCE_POSIX_DISPATCH_CONTEXT *context =
     bounce_posix_get_dispatch_context();
@@ -612,12 +644,14 @@ static void *bounce_posix_waiter_proc(void *parameter) {
 
     if ((poll_fds[0].revents & POLLIN) != 0) {
       bounce_posix_drain_fd(waiter->control_pipe_fds[0]);
-      if (bounce->shutting_down != 0) {
+      if ((bounce->shutting_down != 0) &&
+          (bounce->shutdown_wait_for_idle == 0)) {
         return NULL;
       }
       continue;
     }
-    if (bounce->shutting_down != 0) {
+    if ((bounce->shutting_down != 0) &&
+        (bounce->shutdown_wait_for_idle == 0)) {
       return NULL;
     }
 
@@ -776,15 +810,12 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
     }
 
     (void)bounce_posix_lock(&r->lock);
-    while ((r->ready_queue.head == NULL) &&
-           (r->shutting_down == 0)) {
+    while (r->ready_queue.head == NULL) {
+      if (bounce_posix_should_exit_locked(r)) {
+        (void)bounce_posix_unlock(&r->lock);
+        return true;
+      }
       (void)pthread_cond_wait(&r->parkers_cond, &r->lock);
-    }
-
-    if ((r->shutting_down != 0) &&
-        (r->ready_queue.head == NULL)) {
-      (void)bounce_posix_unlock(&r->lock);
-      return true;
     }
     (void)bounce_posix_unlock(&r->lock);
   }
@@ -1076,20 +1107,30 @@ void bounce_await_posix_fd(
  * @brief Shutdown parking threads.
  * @param r Initialized BOUNCE_CORE.
  */
-void bounce_shutdown(BOUNCE_CORE *r) {
+void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle) {
+  bool signal_waiters = false;
+
   if (r == NULL) {
     return;
   }
 
   (void)bounce_posix_lock(&r->lock);
   r->shutting_down = 1;
+  if (wait_for_idle) {
+    r->shutdown_wait_for_idle = 1;
+  } else {
+    r->shutdown_wait_for_idle = 0;
+    signal_waiters = true;
+  }
   (void)bounce_posix_unlock(&r->lock);
 
   bounce_posix_signal_parkers(r);
-  for (unsigned int waiter_index = 0u;
-       waiter_index < BOUNCE_MAX_POSIX_WAITERS;
-       waiter_index++) {
-    bounce_posix_signal_waiter(&r->waiters[waiter_index]);
+  if (signal_waiters) {
+    for (unsigned int waiter_index = 0u;
+         waiter_index < BOUNCE_MAX_POSIX_WAITERS;
+         waiter_index++) {
+      bounce_posix_signal_waiter(&r->waiters[waiter_index]);
+    }
   }
 }
 
@@ -1105,7 +1146,7 @@ void bounce_deinit(BOUNCE_CORE *r) {
     return;
   }
 
-  bounce_shutdown(r);
+  bounce_shutdown(r, false);
   bounce_queue_init(&abort_queue);
 
   for (unsigned int waiter_index = 0u;

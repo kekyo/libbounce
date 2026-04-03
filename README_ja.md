@@ -211,7 +211,7 @@ int main(void) {
   /* ------------------------------------- */
 
   /* libboundのシャットダウンを開始する */
-  bounce_shutdown(&bounce);
+  bounce_shutdown(&bounce, false);
 
   /* ... (パーキングスレッドが終了するのを待機) */
 
@@ -226,7 +226,7 @@ int main(void) {
 1. `bounce_init()` でコアを初期化する。
 2. 1本以上のスレッドまたはタスクで `bounce_park()` を開始する。
 3. 他の文脈から `bounce_post()` や await API を登録する。
-4. 停止時に `bounce_shutdown()` を呼び、パーキングを解除する。
+4. 停止時に `bounce_shutdown(..., false)` を呼び、パーキングを解除する。
 5. すべての parker の終了を確認してから `bounce_deinit()` する。
 
 `bounce_park()` は停止要求が来るまで内部で待機し続けます。
@@ -305,6 +305,7 @@ static void *parker_thread(void *state) {
 個々の待機要求を途中で止めたい場合は、`bounce_shutdown()` ではなく
 `BOUNCE_CANCELLATION` を使います。
 `bounce_shutdown()` は parker 全体の停止要求であり、ライブラリ全体を畳む時の操作です。
+既に登録済みの待機を消化してから抜けたい時は `wait_for_idle=true` を指定します。
 一方、キャンセルは「この待機だけを取り下げたい」という用途に使います。
 
 使い方は次の通りです。
@@ -561,7 +562,7 @@ libbounce::timer timer;
 |`bounce_post()`|継続処理を ready queue に積み、parker 上で実行させる|
 |`bounce_park()`|現在スレッド/タスクを parker として待機させる|
 |`bounce_park_once()`|現在 dispatch 可能な継続だけを1回処理して戻る|
-|`bounce_shutdown()`|すべての parker に停止要求を出す|
+|`bounce_shutdown()`|すべての parker に停止要求を出す。必要なら pending wait 消化後に抜ける|
 |`bounce_set_core()` / `bounce_get_core()` / `bounce_set_fallback_core()`|現在スレッド/タスクに対応する core を公開・取得し、必要ならプロセス共通フォールバックも使う|
 |`bounce_cancellation_*()`|キャンセルソースの初期化・発行・破棄|
 |`bounce_register_canceled()` / `bounce_unregister_canceled()`|キャンセル時継続の登録・解除|

@@ -25,9 +25,6 @@ namespace {
 
 // Keep path handling generous so deep build directories still fit.
 constexpr size_t path_buffer_length = 32768u;
-// Used only after shutdown to cooperatively drain a coroutine that is still
-// finishing its cleanup path.
-constexpr useconds_t idle_poll_usec = 1000u;
 
 /**
  * Example-local mutable state shared between GTK callbacks, the libbounce
@@ -292,7 +289,8 @@ static void on_button_clicked(GtkButton * /*button*/, gpointer parameter) {
 /**
  * Window-destroy callback.
  * Closing the GTK window is the application shutdown signal, so it forwards to
- * `bounce.shutdown()` to release the parked GUI thread.
+ * `bounce.shutdown()` so the parked GUI thread leaves only after in-flight
+ * bounce waits have settled.
  */
 static void on_window_destroy(GtkWidget *widget, gpointer parameter) {
   example_app *app = static_cast<example_app *>(parameter);
@@ -313,18 +311,6 @@ static gboolean automate_click_on_main_thread(gpointer parameter) {
     gtk_button_clicked(GTK_BUTTON(app->button_handle));
   }
   return G_SOURCE_REMOVE;
-}
-
-/**
- * After `bounce.shutdown()` returns, the coroutine may still be finishing its
- * final cleanup steps. Drain those non-blocking steps before destroying the
- * promise frame or thread state.
- */
-static void drain_pending_write(example_app *app) noexcept {
-  while (app->write_operation && !app->write_operation.done()) {
-    (void)app->bounce->park_once();
-    g_usleep(idle_poll_usec);
-  }
 }
 
 }  // namespace
@@ -388,12 +374,10 @@ int run(int *argc, char ***argv) noexcept {
     // This becomes the only blocking loop on the GTK thread. Because
     // `bounce_init_with_main_context()` bound the bounce to GTK's
     // `GMainContext`, libbounce now pumps both GTK work and bounce-ready work
-    // from the same thread.
+    // from the same thread until `shutdown()` drains any pending wait work.
     (void)bounce_instance.park();
   }
 
-  bounce_instance.shutdown();
-  drain_pending_write(&app);
   close_fd_if_needed(&app.notify_read_fd);
   join_thread_if_needed(app.write_thread);
 
