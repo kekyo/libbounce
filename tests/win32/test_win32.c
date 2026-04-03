@@ -37,6 +37,7 @@ extern void test_cpp_wrapper_current_post_runs_on_attached_parker(void);
 extern void test_cpp_wrapper_await_runs(void);
 extern void test_cpp_wrapper_lambda_await_runs(void);
 extern void test_cpp_wrapper_lambda_await_aborts_on_deinit(void);
+extern void test_win32_example_button_click_writes_sample_file(void);
 
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
 extern void test_cpp_promise_resume_on_runs(void);
@@ -1650,6 +1651,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_await_aborts_on_deinit),
+    TEST_CASE_ENTRY(test_win32_example_button_click_writes_sample_file),
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
     TEST_CASE_ENTRY(test_cpp_promise_resume_on_runs),
     TEST_CASE_ENTRY(test_cpp_promise_make_awaitable_runs),

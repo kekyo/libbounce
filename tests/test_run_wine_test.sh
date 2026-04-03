@@ -33,6 +33,7 @@ wine_prefix_archive="$tmp_dir/build/wineprefix.tar"
 runtime_name=libbounce-runtime
 test_binary="$tmp_dir/build/tests/test_win32.exe"
 shared_library="$tmp_dir/build/libbounce.dll"
+extra_runtime_file="$tmp_dir/build/libbounce_win32_example.exe"
 wine_test_command='C:/libbounce-runtime/test_win32.exe'
 wineboot_log="$tmp_dir/wineboot.log"
 wine_log="$tmp_dir/wine.log"
@@ -41,10 +42,11 @@ fake_wineboot="$fake_bin_dir/fake-wineboot"
 fake_wine="$fake_bin_dir/fake-wine"
 tar_listing="$tmp_dir/archive.txt"
 
-mkdir -p "$fake_bin_dir" "$(dirname "$test_binary")" "$(dirname "$shared_library")"
+mkdir -p "$fake_bin_dir" "$(dirname "$test_binary")" "$(dirname "$shared_library")" "$(dirname "$extra_runtime_file")"
 
 printf '%s\n' 'test-binary' >"$test_binary"
 printf '%s\n' 'shared-library' >"$shared_library"
+printf '%s\n' 'example-binary' >"$extra_runtime_file"
 
 cat <<EOF >"$fake_wineboot"
 #!/bin/sh
@@ -64,6 +66,7 @@ set -eu
 [ "\$1" = "$wine_test_command" ] || exit 1
 [ -f "\$WINEPREFIX/drive_c/$runtime_name/test_win32.exe" ] || exit 1
 [ -f "\$WINEPREFIX/drive_c/$runtime_name/libbounce.dll" ] || exit 1
+[ -f "\$WINEPREFIX/drive_c/$runtime_name/libbounce_win32_example.exe" ] || exit 1
 printf '%s\n' "\$1" >>"$wine_log"
 EOF
 
@@ -74,7 +77,7 @@ WINEBOOT="$fake_wineboot" \
 WINEPREFIX="$wine_prefix" \
 WINEARCH=win64 \
 WINEDEBUG=-all \
-sh "$repo_root/scripts/run_wine_test.sh" "$wine_prefix" "$wine_prefix_archive" "$runtime_name" "$test_binary" "$shared_library" "$wine_test_command"
+sh "$repo_root/scripts/run_wine_test.sh" "$wine_prefix" "$wine_prefix_archive" "$runtime_name" "$test_binary" "$shared_library" "$wine_test_command" "$extra_runtime_file"
 
 assert_missing "$wine_prefix"
 assert_file "$wine_prefix_archive"
@@ -84,13 +87,14 @@ tar -tf "$wine_prefix_archive" >"$tar_listing"
 assert_contains "$tar_listing" 'wineprefix/dosdevices/c:'
 assert_contains "$tar_listing" 'wineprefix/drive_c/libbounce-runtime/test_win32.exe'
 assert_contains "$tar_listing" 'wineprefix/drive_c/libbounce-runtime/libbounce.dll'
+assert_contains "$tar_listing" 'wineprefix/drive_c/libbounce-runtime/libbounce_win32_example.exe'
 
 WINE="$fake_wine" \
 WINEBOOT="$fake_wineboot" \
 WINEPREFIX="$wine_prefix" \
 WINEARCH=win64 \
 WINEDEBUG=-all \
-sh "$repo_root/scripts/run_wine_test.sh" "$wine_prefix" "$wine_prefix_archive" "$runtime_name" "$test_binary" "$shared_library" "$wine_test_command"
+sh "$repo_root/scripts/run_wine_test.sh" "$wine_prefix" "$wine_prefix_archive" "$runtime_name" "$test_binary" "$shared_library" "$wine_test_command" "$extra_runtime_file"
 
 assert_missing "$wine_prefix"
 assert_file "$wine_prefix_archive"

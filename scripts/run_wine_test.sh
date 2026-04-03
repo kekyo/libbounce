@@ -8,6 +8,7 @@ runtime_name=$3
 test_binary=$4
 shared_library=$5
 wine_test_command=$6
+shift 6
 
 script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 prepare_script="$script_dir/prepare_wine_runtime.sh"
@@ -63,5 +64,5 @@ cleanup() {
 trap 'status=$?; cleanup "$status"' EXIT HUP INT TERM
 
 ensure_prefix
-sh "$prepare_script" "$wine_prefix" "$runtime_name" "$test_binary" "$shared_library"
+sh "$prepare_script" "$wine_prefix" "$runtime_name" "$test_binary" "$shared_library" "$@"
 "$wine_command" "$wine_test_command"
