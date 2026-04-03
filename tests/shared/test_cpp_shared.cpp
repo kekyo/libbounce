@@ -86,8 +86,13 @@ static_assert(
 static_assert(
   std::is_same<
     decltype(libbounce::bounce::get_current()),
+    libbounce::bounce_ref>::value,
+  "libbounce::bounce::get_current must return bounce_ref");
+static_assert(
+  std::is_constructible<
+    libbounce::bounce_ref,
     libbounce::bounce_base_ref<BOUNCE_CORE>>::value,
-  "libbounce::bounce::get_current must return bounce_base_ref");
+  "libbounce::bounce_ref must be constructible from bounce_base_ref");
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
 static_assert(

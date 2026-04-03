@@ -425,9 +425,6 @@ public:
   }
 };
 
-template <typename TBOUNCE_CORE>
-using bounce_ref_base = bounce_base_ref<TBOUNCE_CORE>;
-
 template <typename TBOUNCE_CORE> class bounce_base {
 private:
   template<typename, typename> friend class cancellation_base;
@@ -493,9 +490,11 @@ protected:
 
   inline bounce_base() noexcept {
     ::bounce_init(&bounce_);
+    ::bounce_set_core(&bounce_);
   }
 
   inline ~bounce_base() noexcept {
+    ::bounce_set_core(nullptr);
     ::bounce_deinit(&bounce_);
   }
 

@@ -580,7 +580,7 @@ parker.join();
 
 Also, while the C++ `park()` and `park_once()` wrappers are running, they
 publish the current bounce so `libbounce::bounce::get_current()` resolves to a
-non-owning `bounce_base_ref`.
+backend-specific non-owning `bounce_ref`.
 
 ```cpp
 /* Own the bounce core */
@@ -593,7 +593,7 @@ libbounce::bounce bounce;
   /* If the current bounce is available, register another continuation through it */
   if (current) {
     (void)current.post([] {
-      /* Continuation body through bounce_base_ref obtained from get_current() */
+      /* Continuation body through bounce_ref obtained from get_current() */
     });
   }
 });
@@ -724,7 +724,7 @@ The common types are as follows.
 |Type / Method|Role|
 |:----|:----|
 |`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `park()`, `park_once()`, and `shutdown()`|
-|`libbounce::bounce::get_current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `bounce_base_ref`|
+|`libbounce::bounce::get_current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `bounce_ref`|
 |`libbounce::bounce_base_ref`|Common non-owning reference. Lets you call `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()`, and similar operations on a core managed elsewhere|
 |`libbounce::bounce_ref`|Backend-specific non-owning reference. Extends `bounce_base_ref` with backend-local helper methods where available|
 |`libbounce::timer`|RAII wrapper for `BOUNCE_TIMER`. Registers timer waits with `wait(bounce, duration_msec, ...)`|

@@ -31,7 +31,6 @@ constexpr size_t path_buffer_length = 32768u;
  * coroutine, and the worker thread that performs the blocking file write.
  */
 struct example_app {
-  libbounce::bounce *bounce = nullptr;
   libbounce::promise<void> write_operation;
   std::thread write_thread;
   GtkWidget *window_handle = nullptr;
@@ -203,7 +202,8 @@ static void finish_write(example_app *app, bool close_after_write) noexcept {
  * 1. Build the destination path next to the running executable.
  * 2. Create a pipe used only as a libbounce-awaitable completion signal.
  * 3. Start a worker thread that writes the file and signals the pipe.
- * 4. `co_await` the readable end with `bounce.await(fd, G_IO_IN, ...)`.
+ * 4. Resolve the current parked bounce as `bounce_ref` and `co_await` the
+ *    readable end.
  * 5. Close the pipe, join the worker, and re-enable the button.
  */
 static libbounce::promise<void> write_sample_file_async(example_app *app) {
@@ -246,8 +246,10 @@ static libbounce::promise<void> write_sample_file_async(example_app *app) {
     co_return;
   }
 
-  const libbounce::await_result await_result =
-    co_await app->bounce->await(app->notify_read_fd, G_IO_IN, nullptr);
+  auto current_bounce = libbounce::bounce::get_current();
+
+  auto await_result =
+    co_await current_bounce.await(app->notify_read_fd, G_IO_IN, nullptr);
 
   if (await_result.completed()) {
     read_signal_byte(app->notify_read_fd, &result_byte);
@@ -294,11 +296,12 @@ static void on_button_clicked(GtkButton * /*button*/, gpointer parameter) {
  */
 static void on_window_destroy(GtkWidget *widget, gpointer parameter) {
   example_app *app = static_cast<example_app *>(parameter);
+  auto current_bounce = libbounce::bounce::get_current();
 
   (void)widget;
   app->button_handle = nullptr;
   app->window_handle = nullptr;
-  app->bounce->shutdown();
+  current_bounce.shutdown();
 }
 
 /**
@@ -331,7 +334,6 @@ int run(int *argc, char ***argv) noexcept {
   app.gtk_main_context = g_main_context_default();
   libbounce::bounce bounce_instance(app.gtk_main_context);
 
-  app.bounce = &bounce_instance;
   app.window_handle = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   if (app.window_handle == nullptr) {
     return 1;

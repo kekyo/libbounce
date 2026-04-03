@@ -239,6 +239,16 @@ private:
   explicit inline bounce_ref(BOUNCE_CORE *core) noexcept
     : bounce_base_ref(core) {
   }
+
+public:
+  /**
+   * @brief Build a backend-specific bounce reference from a common
+   * non-owning bounce reference.
+   * @param reference Common bounce reference.
+   */
+  explicit inline bounce_ref(const bounce_base_ref<BOUNCE_CORE>& reference) noexcept
+    : bounce_base_ref(reference.get_core()) {
+  }
 };
 
 class bounce : public bounce_base<BOUNCE_CORE> {
@@ -255,15 +265,26 @@ public:
   ~bounce() = default;
 
   /**
+   * @brief Get the current thread/task-local or fallback bounce as a
+   * backend-specific non-owning reference.
+   * @return Backend-specific bounce reference. The returned reference is
+   * unbound when neither a current attachment nor a fallback core is
+   * available.
+   */
+  static inline bounce_ref get_current() noexcept {
+    return bounce_ref(bounce_base<BOUNCE_CORE>::get_current());
+  }
+
+  /**
    * @brief Get a non-owning backend-specific bounce reference from the current
    * attachment or fallback core.
    * @return Bounce reference when present.
    */
   static inline std::optional<bounce_ref> current() noexcept {
-    bounce_base_ref<BOUNCE_CORE> current = bounce::get_current();
+    bounce_ref current = bounce::get_current();
 
     return current ?
-             std::optional<bounce_ref>(bounce_ref(current.get_core())) :
+             std::optional<bounce_ref>(current) :
              std::nullopt;
   }
 };

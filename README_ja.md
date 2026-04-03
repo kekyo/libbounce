@@ -527,7 +527,7 @@ parker.join();
 
 また、C++ の `park()` / `park_once()` ラッパーは実行中だけ
 そのスレッドの current core を公開するため、
-`libbounce::bounce::get_current()` から非所有の `bounce_base_ref` を取得できます。
+`libbounce::bounce::get_current()` から非所有の `bounce_ref` を取得できます。
 
 ```cpp
 /* bounce core を所有する */
@@ -540,7 +540,7 @@ libbounce::bounce bounce;
   /* current が取得できたら、その参照経由で継続を登録できる */
   if (current) {
     (void)current.post([] {
-      /* get_current() から得た bounce_base_ref 経由の継続処理 */
+      /* get_current() から得た bounce_ref 経由の継続処理 */
     });
   }
 });
@@ -658,7 +658,7 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 |型/メソッド|役割|
 |:----|:----|
 |`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `park()`, `park_once()`, `shutdown()` を持つ|
-|`libbounce::bounce::get_current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `bounce_base_ref` として取得する|
+|`libbounce::bounce::get_current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `bounce_ref` として取得する|
 |`libbounce::bounce_base_ref`|共通の非所有参照。既にどこかで管理している core に対して `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()` などを行う|
 |`libbounce::bounce_ref`|backend 固有の非所有参照。`bounce_base_ref` を拡張し、必要なら backend 固有 helper を持つ|
 |`libbounce::timer`|`BOUNCE_TIMER` の RAII ラッパー。`wait(bounce, duration_msec, ...)` でタイマー待機を登録する|

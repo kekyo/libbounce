@@ -19,10 +19,10 @@ constexpr DWORD path_buffer_length = 32768u;
 
 /**
  * Example-local mutable state shared between Win32 callbacks and the coroutine.
- * The coroutine itself is stored here so its lifetime is tied to the window.
+ * The owning bounce itself lives in `run()`, while the coroutine is stored
+ * here so its lifetime stays tied to the window.
  */
 struct example_app {
-  libbounce::bounce bounce;
   libbounce::promise<void> write_operation;
   HWND window_handle = NULL;
   HWND button_handle = NULL;
@@ -82,7 +82,8 @@ static void finish_write(example_app *app) noexcept {
  * The sequence is:
  * 1. Create the destination file with `FILE_FLAG_OVERLAPPED`.
  * 2. Kick `WriteFile()` with an `OVERLAPPED` that owns a manual-reset event.
- * 3. Hand that event HANDLE to `bounce.await(...)` and `co_await` it.
+ * 3. Resolve the current parked bounce and hand that event HANDLE to
+ *    `bounce.await(...)`.
  * 4. Close the wait handle and file handle after the await continuation runs.
  */
 static libbounce::promise<void> write_sample_file_async(example_app *app) {
@@ -138,8 +139,16 @@ static libbounce::promise<void> write_sample_file_async(example_app *app) {
     (void)SetEvent(signal_event);
   }
 
-  const libbounce::await_result result =
-    co_await app->bounce.await(signal_event, nullptr);
+  auto current_bounce = libbounce::bounce::get_current();
+  if (!current_bounce) {
+    (void)CloseHandle(signal_event);
+    (void)CloseHandle(file_handle);
+    finish_write(app);
+    co_return;
+  }
+
+  auto result =
+    co_await current_bounce.await(signal_event, nullptr);
 
   // If shutdown or another abort path wins, cancel the I/O so the handle can
   // be released promptly. On success, query the completion result to finalize
@@ -222,10 +231,14 @@ static LRESULT CALLBACK example_window_proc(
 
     case WM_CLOSE:
       if (app != nullptr) {
+        auto current_bounce = libbounce::bounce::get_current();
+
         // Closing the native window comes first, then `shutdown()` asks the
         // parker to leave only after any in-flight bounce wait has settled.
         (void)DestroyWindow(window_handle);
-        app->bounce.shutdown();
+        if (current_bounce) {
+          current_bounce.shutdown();
+        }
         return 0;
       }
       break;
@@ -263,6 +276,7 @@ static bool register_window_class(HINSTANCE instance) noexcept {
 }  // namespace
 
 int run(HINSTANCE instance, int show_command) noexcept {
+  libbounce::bounce bounce_instance;
   example_app app;
 
   if (!register_window_class(instance)) {
@@ -311,7 +325,7 @@ int run(HINSTANCE instance, int show_command) noexcept {
   // The GUI thread itself becomes the parker. The C++ wrapper publishes the
   // current core while parked, so coroutine continuations and helper lookups
   // on this thread stay bound to the same bounce instance.
-  (void)app.bounce.park();
+  (void)bounce_instance.park();
 
   return 0;
 }
