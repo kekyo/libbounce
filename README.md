@@ -79,17 +79,17 @@ make -f Makefile.posix_glib all
 make -f Makefile.freertos test
 
 # Win32 cross build
-make -f Makefile.win32 all CC=x86_64-w64-mingw32-gcc-win32
+make -f Makefile.win32 all
 ```
 
 If you want to run the full test set including the C / C++ layers, use:
 
 ```bash
 # Full C / C++ test suite
-sh build.sh
+./build.sh
 
 # Full C++20 coroutine test suite
-sh build_cxx20.sh
+./build_cxx20.sh
 ```
 
 For embedding, add the public headers under `include/libbounce/` and the
@@ -281,9 +281,8 @@ This matters in particular when you want to register the next async operation in
 the middle of a callback chain, or when C++ code wants to use the current core
 to resolve `libbounce::bounce::get_current()` or coroutine resumption targets.
 Conversely, it is not required if you always pass `BOUNCE_CORE*` explicitly.
-The C++ `park()` and `park_once()` wrappers publish the current core
-automatically while they are running, but the C API still requires explicit
-`bounce_set_core()` when you want `bounce_get_core()` to work on a parker.
+The C++ API provides `bounce.set_default()`, which is a thin wrapper around
+`bounce_set_core(bounce.get_core())` for the current thread or task.
 
 The following example uses `bounce_get_core()` inside a continuation to chain
 the next continuation.
@@ -578,16 +577,18 @@ bounce.shutdown();
 parker.join();
 ```
 
-Also, while the C++ `park()` and `park_once()` wrappers are running, they
-publish the current bounce so `libbounce::bounce::get_current()` resolves to a
-backend-specific non-owning `bounce_ref`.
+Also, when you want `libbounce::bounce::get_current()` to resolve to a
+backend-specific non-owning `bounce_ref` on the current thread or task, call
+`set_default()` explicitly before `park()` or `park_once()`.
 
 ```cpp
 /* Own the bounce core */
 libbounce::bounce bounce;
+/* Publish it to the current thread or task */
+bounce.set_default();
 /* Queue a continuation that will run on the parker */
 (void)bounce.post([] {
-  /* Read the current bounce reference while parked */
+  /* Read the current bounce reference from TLS */
   auto current = libbounce::bounce::get_current();
 
   /* If the current bounce is available, register another continuation through it */
@@ -597,7 +598,6 @@ libbounce::bounce bounce;
     });
   }
 });
-/* The C++ wrapper publishes the current core while dispatching continuations */
 (void)bounce.park_once();
 ```
 
@@ -723,7 +723,7 @@ The common types are as follows.
 
 |Type / Method|Role|
 |:----|:----|
-|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `park()`, `park_once()`, and `shutdown()`|
+|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `set_default()`, `park()`, `park_once()`, and `shutdown()`|
 |`libbounce::bounce::get_current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `bounce_ref`|
 |`libbounce::bounce_base_ref`|Common non-owning reference. Lets you call `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()`, and similar operations on a core managed elsewhere|
 |`libbounce::bounce_ref`|Backend-specific non-owning reference. Extends `bounce_base_ref` with backend-local helper methods where available|
@@ -839,9 +839,9 @@ bounce_init_with_main_context(&bounce, g_main_context_default());
 ```
 
 If callbacks or helpers need `bounce_get_core()` in the C API, call
-`bounce_set_core()` before entering `bounce_park()`. The C++ `bounce.park()`
-and `bounce.park_once()` wrappers publish the current core automatically while
-they are running.
+`bounce_set_core()` before entering `bounce_park()`. In the C++ API, call
+`bounce.set_default()` before `bounce.park()` or `bounce.park_once()` when the
+current thread or task needs `get_current()`.
 
 ---
 

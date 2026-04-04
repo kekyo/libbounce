@@ -70,7 +70,7 @@ make -f Makefile.posix_glib all
 make -f Makefile.freertos test
 
 # Win32 cross build
-make -f Makefile.win32 all CC=x86_64-w64-mingw32-gcc-win32
+make -f Makefile.win32 all
 ```
 
 テストを含めて一通り確認したい場合は、以下のスクリプトが使えます。
@@ -101,11 +101,8 @@ libbounce全体の開発ビルドは、以下の手順で行います。まず�
 $ sudo dpkg --add-architecture i386
 $ echo "deb [trusted=yes] https://dl.espressif.com/dl/eim/apt/ stable main" | sudo tee /etc/apt/sources.list.d/espressif.list
 $ sudo apt update
-$ sudo apt install build-essential pkg-config libglib2.0-dev \
-    nodejs \
-    gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 \
-    gcc-mingw-w64-i686-win32 g++-mingw-w64-i686-win32 \
-    wine wine64 wine32:i386 podman
+$ sudo apt install build-essential g++-mingw-w64 pkg-config libglib2.0-dev liburing-dev \
+    nodejs wine wine64 wine32:i386 podman
 $ sudo apt install eim-cli
 $ eim install
 ```
@@ -255,9 +252,9 @@ TLS に core が登録されていない場合、`bounce_get_core()` は
 C++ 側で `libbounce::bounce::get_current()` や coroutine 継続復帰先の解決に
 現在の core を使いたい場合に意味があります。
 逆に、常に `BOUNCE_CORE*` を明示的に受け渡す設計なら必須ではありません。
-ただし C++ の `park()` / `park_once()` ラッパーは実行中だけ current core を
-自動公開するため、その間の `get_current()` 解決には追加の attach は不要です。
-一方、C API では引き続き `bounce_set_core()` を明示的に呼ぶ必要があります。
+一方、C++ API には現在スレッド/タスクに対して
+`bounce_set_core(bounce.get_core())` を行う薄いラッパー
+`bounce.set_default()` があります。
 
 以下は、継続の中で `bounce_get_core()` を使って次の継続を連鎖させる例です。
 
@@ -525,16 +522,18 @@ bounce.shutdown();
 parker.join();
 ```
 
-また、C++ の `park()` / `park_once()` ラッパーは実行中だけ
-そのスレッドの current core を公開するため、
-`libbounce::bounce::get_current()` から非所有の `bounce_ref` を取得できます。
+また、現在スレッド/タスクで
+`libbounce::bounce::get_current()` から非所有の `bounce_ref` を取得したい場合は、
+`park()` / `park_once()` の前に明示的に `set_default()` を呼びます。
 
 ```cpp
 /* bounce core を所有する */
 libbounce::bounce bounce;
+/* 現在スレッド/タスクへ公開する */
+bounce.set_default();
 /* parker 上で動く継続を登録する */
 (void)bounce.post([] {
-  /* park 中なら current core を参照できる */
+  /* TLS から current core を参照する */
   auto current = libbounce::bounce::get_current();
 
   /* current が取得できたら、その参照経由で継続を登録できる */
@@ -544,7 +543,6 @@ libbounce::bounce bounce;
     });
   }
 });
-/* C++ ラッパーは継続実行中だけ current core を公開する */
 (void)bounce.park_once();
 ```
 
@@ -657,7 +655,7 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 
 |型/メソッド|役割|
 |:----|:----|
-|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `park()`, `park_once()`, `shutdown()` を持つ|
+|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `set_default()`, `park()`, `park_once()`, `shutdown()` を持つ|
 |`libbounce::bounce::get_current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `bounce_ref` として取得する|
 |`libbounce::bounce_base_ref`|共通の非所有参照。既にどこかで管理している core に対して `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()` などを行う|
 |`libbounce::bounce_ref`|backend 固有の非所有参照。`bounce_base_ref` を拡張し、必要なら backend 固有 helper を持つ|
@@ -768,8 +766,8 @@ bounce_init_with_main_context(&bounce, g_main_context_default());
 
 callback や helper から C API の `bounce_get_core()` が必要なら、
 `bounce_park()` へ入る前に `bounce_set_core()` で current core を公開してください。
-C++ の `bounce.park()` / `bounce.park_once()` ラッパーは実行中だけ
-current core を自動公開します。
+C++ API では、現在スレッド/タスクで `get_current()` を使いたい場合に
+`bounce.park()` / `bounce.park_once()` の前で `bounce.set_default()` を呼びます。
 
 ---
 
@@ -788,8 +786,7 @@ sudo apt install ./screw-up-native-ubuntu-noble-amd64-0.1.0.deb
 続いて、パッケージ生成に必要なツールを導入します。
 
 ```bash
-sudo apt install podman qemu-user-static zip \
-  gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-i686-win32
+sudo apt install podman qemu-user-static zip g++-mingw-w64 wine wine64
 ```
 
 すべての対応成果物を生成するには、次を実行します。

@@ -10,7 +10,7 @@
 
 #include <libbounce/posix_glib.h>
 
-#include "examples/posix-glib/example_app.h"
+#include "examples/posix-io_uring-glib/example_app.h"
 
 namespace {
 
@@ -46,18 +46,18 @@ static bool build_runtime_paths(
   }
   *separator = '\0';
 
-  example_path = build_directory + "/examples/posix-glib/" +
-                 libbounce_example::posix_glib::example_executable_name;
+  example_path = build_directory + "/examples/posix-io_uring-glib/" +
+                 libbounce_example::posix_io_uring_glib::example_executable_name;
   sample_path = executable_path.data();
   sample_path.push_back('/');
   sample_path.append(
-    libbounce_example::posix_glib::output_file_name);
+    libbounce_example::posix_io_uring_glib::output_file_name);
   return true;
 }
 
 static bool read_sample_file(std::string &contents, const std::string &sample_path) {
   FILE *file = fopen(sample_path.c_str(), "rb");
-  std::array<char, sizeof(libbounce_example::posix_glib::sample_file_text)> buffer {};
+  std::array<char, sizeof(libbounce_example::posix_io_uring_glib::sample_file_text)> buffer {};
   size_t bytes_read;
 
   if (file == nullptr) {
@@ -66,7 +66,7 @@ static bool read_sample_file(std::string &contents, const std::string &sample_pa
 
   bytes_read = fread(buffer.data(), 1u, buffer.size() - 1u, file);
   (void)fclose(file);
-  if (bytes_read != libbounce_example::posix_glib::sample_file_text_length) {
+  if (bytes_read != libbounce_example::posix_io_uring_glib::sample_file_text_length) {
     return false;
   }
 
@@ -92,7 +92,7 @@ static bool write_sample_file(
 
 }  // namespace
 
-extern "C" void test_posix_glib_gtk3_example_button_click_writes_sample_file(void) {
+extern "C" void test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file(void) {
   std::string example_path;
   std::string sample_path;
   struct stat example_stat {};
@@ -107,33 +107,34 @@ extern "C" void test_posix_glib_gtk3_example_button_click_writes_sample_file(voi
     }                                                                           \
   } while (0)
 
+  (void)test_timeout_ms;
   CHECK_TRUE(build_runtime_paths(example_path, sample_path));
   CHECK_TRUE(stat(example_path.c_str(), &example_stat) == 0);
   (void)unlink(sample_path.c_str());
   CHECK_TRUE(write_sample_file(sample_path, "stale\n", sizeof("stale\n") - 1u));
   {
     int argc = 1;
-    char program_name[] = "libbounce_posix_glib_gtk3_example";
+    char program_name[] = "libbounce_posix_io_uring_glib_gtk3_example";
     char *argv_storage[] = { program_name, NULL };
     char **argv = argv_storage;
     libbounce::bounce bounce_instance(g_main_context_default());
     std::string contents;
 
     CHECK_TRUE(setenv(
-      libbounce_example::posix_glib::automation_env_name,
+      libbounce_example::posix_io_uring_glib::automation_env_name,
       "1",
       1) == 0);
     bounce_instance.set_default();
     CHECK_TRUE(
-      libbounce_example::posix_glib::run(bounce_instance, &argc, &argv) == 0);
-    (void)unsetenv(libbounce_example::posix_glib::automation_env_name);
+      libbounce_example::posix_io_uring_glib::run(bounce_instance, &argc, &argv) == 0);
+    (void)unsetenv(libbounce_example::posix_io_uring_glib::automation_env_name);
 
     CHECK_TRUE(stat(sample_path.c_str(), &sample_stat) == 0);
     CHECK_TRUE(sample_stat.st_size ==
-      (off_t)libbounce_example::posix_glib::sample_file_text_length);
+      (off_t)libbounce_example::posix_io_uring_glib::sample_file_text_length);
     CHECK_TRUE(read_sample_file(contents, sample_path));
     CHECK_TRUE(
-      contents == libbounce_example::posix_glib::sample_file_text);
+      contents == libbounce_example::posix_io_uring_glib::sample_file_text);
   }
 
   success = true;

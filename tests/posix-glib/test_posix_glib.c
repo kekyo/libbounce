@@ -32,16 +32,17 @@ extern void test_cpp_wrapper_registration_unregister_prevents_callback(void);
 extern void test_cpp_wrapper_registration_precanceled_completes_canceled(void);
 extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void);
 extern void test_cpp_wrapper_park_once_post_runs(void);
-extern void test_cpp_wrapper_attach_current_timeout_await_runs(void);
-extern void test_cpp_wrapper_attach_current_restores_fallback_view(void);
+extern void test_cpp_wrapper_set_default_timeout_await_runs(void);
+extern void test_cpp_wrapper_set_default_overrides_fallback_view(void);
 extern void test_cpp_wrapper_park_once_returns_before_timeout_completion(void);
 extern void test_cpp_wrapper_park_once_nested_post_inlines(void);
 extern void test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit(void);
-extern void test_cpp_wrapper_current_post_runs_on_attached_parker(void);
+extern void test_cpp_wrapper_current_post_runs_on_defaulted_parker(void);
 extern void test_cpp_wrapper_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_aborts_on_deinit(void);
 extern void test_posix_glib_gtk3_example_button_click_writes_sample_file(void);
+extern void test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file(void);
 
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
 extern void test_cpp_promise_resume_on_runs(void);
@@ -52,6 +53,12 @@ extern void test_cpp_promise_nested_value_runs(void);
 extern void test_cpp_promise_exception_propagates(void);
 extern void test_cpp_promise_await_canceled_runs(void);
 extern void test_cpp_promise_fd_await_runs(void);
+extern void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs(void);
+#if defined(__linux__)
+extern void test_cpp_io_uring_operation_init_accessors(void);
+extern void test_cpp_promise_io_uring_await_runs(void);
+extern void test_cpp_promise_io_uring_await_canceled_runs(void);
+#endif
 #endif
 
 #define TEST_TIMEOUT_MS 5000u
@@ -1367,8 +1374,8 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_post_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_post_aborts_on_deinit),
     TEST_CASE_ENTRY(test_cpp_wrapper_timer_await_runs),
-    TEST_CASE_ENTRY(test_cpp_wrapper_attach_current_timeout_await_runs),
-    TEST_CASE_ENTRY(test_cpp_wrapper_attach_current_restores_fallback_view),
+    TEST_CASE_ENTRY(test_cpp_wrapper_set_default_timeout_await_runs),
+    TEST_CASE_ENTRY(test_cpp_wrapper_set_default_overrides_fallback_view),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_returns_before_timeout_completion),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_timer_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_timer_await_aborts_on_deinit),
@@ -1381,11 +1388,12 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_nested_post_inlines),
     TEST_CASE_ENTRY(test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit),
-    TEST_CASE_ENTRY(test_cpp_wrapper_current_post_runs_on_attached_parker),
+    TEST_CASE_ENTRY(test_cpp_wrapper_current_post_runs_on_defaulted_parker),
     TEST_CASE_ENTRY(test_cpp_wrapper_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_aborts_on_deinit),
     TEST_CASE_ENTRY(test_posix_glib_gtk3_example_button_click_writes_sample_file),
+    TEST_CASE_ENTRY(test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file),
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
     TEST_CASE_ENTRY(test_cpp_promise_resume_on_runs),
     TEST_CASE_ENTRY(test_cpp_promise_make_awaitable_runs),
@@ -1395,6 +1403,12 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_exception_propagates),
     TEST_CASE_ENTRY(test_cpp_promise_await_canceled_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fd_await_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs),
+#if defined(__linux__)
+    TEST_CASE_ENTRY(test_cpp_io_uring_operation_init_accessors),
+    TEST_CASE_ENTRY(test_cpp_promise_io_uring_await_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_io_uring_await_canceled_runs),
+#endif
 #endif
     TEST_CASE_ENTRY(test_park_once_returns_before_timeout_completion),
     TEST_CASE_ENTRY(test_park_once_nested_post_inlines),

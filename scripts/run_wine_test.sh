@@ -15,6 +15,23 @@ prepare_script="$script_dir/prepare_wine_runtime.sh"
 wine_command=${WINE:-wine}
 wineboot_command=${WINEBOOT:-wineboot}
 
+remove_prefix() {
+	attempts=5
+
+	while [ "$attempts" -gt 0 ]; do
+		rm -rf "$wine_prefix"
+		if [ ! -e "$wine_prefix" ]; then
+			return 0
+		fi
+
+		attempts=$((attempts - 1))
+		[ "$attempts" -gt 0 ] || break
+		sleep 1
+	done
+
+	return 1
+}
+
 archive_prefix() {
 	prefix_parent=$(dirname "$wine_prefix")
 	prefix_name=$(basename "$wine_prefix")
@@ -23,13 +40,13 @@ archive_prefix() {
 
 	rm -f "$wine_prefix_archive"
 	tar -C "$prefix_parent" -cf "$wine_prefix_archive" "$prefix_name"
-	rm -rf "$wine_prefix"
+	remove_prefix
 }
 
 restore_prefix() {
 	prefix_parent=$(dirname "$wine_prefix")
 
-	rm -rf "$wine_prefix"
+	remove_prefix
 	mkdir -p "$prefix_parent"
 	tar -C "$prefix_parent" -xf "$wine_prefix_archive"
 }
@@ -44,7 +61,7 @@ ensure_prefix() {
 		return 0
 	fi
 
-	rm -rf "$wine_prefix"
+	remove_prefix
 	if ! "$wineboot_command" -u; then
 		printf '%s\n' "Win32 test runtime initialization failed for WINEARCH=${WINEARCH:-unknown}" >&2
 		return 1

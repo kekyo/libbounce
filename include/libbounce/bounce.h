@@ -243,35 +243,6 @@ template <typename TBOUNCE_CORE> class bounce_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_TIMER> class timer_base;
 template <typename TBOUNCE_CORE> class bounce_base_ref;
 
-namespace detail {
-
-// Preserve the previous thread-local attachment without treating the
-// process-wide fallback core as if it had been attached locally.
-template<typename TBOUNCE_CORE, typename PARK_FN>
-inline bool park_with_current_core(
-  TBOUNCE_CORE *core,
-  PARK_FN&& park_fn) noexcept {
-  TBOUNCE_CORE *previous_core;
-  bool result;
-
-  if (core == nullptr) {
-    return false;
-  }
-
-  previous_core = static_cast<TBOUNCE_CORE *>(::bounce_get_core());
-  ::bounce_set_core(nullptr);
-  if (static_cast<TBOUNCE_CORE *>(::bounce_get_core()) == previous_core) {
-    previous_core = nullptr;
-  }
-
-  ::bounce_set_core(core);
-  result = park_fn();
-  ::bounce_set_core(previous_core);
-  return result;
-}
-
-}
-
 /**
  * @brief Non-owning bounce reference shared by backend-specific handles.
  * @tparam TBOUNCE_CORE Backend bounce core storage type.
@@ -302,6 +273,15 @@ public:
    */
   inline TBOUNCE_CORE *get_core() const noexcept {
     return bounce_;
+  }
+
+  /**
+   * @brief Publish this bounce reference as the current thread/task-local core.
+   * @remarks Passing an unbound reference clears the current attachment. This
+   * is equivalent to calling `bounce_set_core(get_core())`.
+   */
+  inline void set_default() const noexcept {
+    ::bounce_set_core(bounce_);
   }
 
   /**
@@ -356,13 +336,13 @@ public:
    * @brief Park current thread and run continuation repeatedly.
    * @return True when succeeded continuation pumps.
    * @remarks The thread will block inside. Release when `shutdown()` called.
-   * While parked through this C++ wrapper, `get_current()` resolves to the
-   * same core on the current thread or task.
+   * Call `set_default()` first when callbacks or coroutine helpers on this
+   * thread need `get_current()`.
    */
   inline bool park() noexcept {
-    return detail::park_with_current_core(
-      bounce_,
-      [this]() noexcept { return ::bounce_park(bounce_, 0u); });
+    return (bounce_ != nullptr) ?
+             ::bounce_park(bounce_, 0u) :
+             false;
   }
 
   /**
@@ -370,30 +350,27 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. While parked through this C++
-   * wrapper, `get_current()` resolves to the same core on the current thread
-   * or task.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park(unsigned int max_inline_depth) noexcept {
-    return detail::park_with_current_core(
-      bounce_,
-      [this, max_inline_depth]() noexcept {
-        return ::bounce_park(bounce_, max_inline_depth);
-      });
+    return (bounce_ != nullptr) ?
+             ::bounce_park(bounce_, max_inline_depth) :
+             false;
   }
 
   /**
    * @brief Pump current thread once without waiting for new completion work.
    * @return True when succeeded continuation pumps.
    * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work. While
-   * parked through this C++ wrapper, `get_current()` resolves to the same
-   * core on the current thread or task.
+   * dispatchable and then returns without blocking for future work. Call
+   * `set_default()` first when callbacks or coroutine helpers on this thread
+   * need `get_current()`.
    */
   inline bool park_once() noexcept {
-    return detail::park_with_current_core(
-      bounce_,
-      [this]() noexcept { return ::bounce_park_once(bounce_, 0u); });
+    return (bounce_ != nullptr) ?
+             ::bounce_park_once(bounce_, 0u) :
+             false;
   }
 
   /**
@@ -401,16 +378,13 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. While parked through this C++
-   * wrapper, `get_current()` resolves to the same core on the current thread
-   * or task.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park_once(unsigned int max_inline_depth) noexcept {
-    return detail::park_with_current_core(
-      bounce_,
-      [this, max_inline_depth]() noexcept {
-        return ::bounce_park_once(bounce_, max_inline_depth);
-      });
+    return (bounce_ != nullptr) ?
+             ::bounce_park_once(bounce_, max_inline_depth) :
+             false;
   }
 
   /**
@@ -444,6 +418,14 @@ public:
    */
   inline TBOUNCE_CORE *get_core() noexcept {
     return &bounce_;
+  }
+
+  /**
+   * @brief Publish this bounce as the current thread/task-local core.
+   * @remarks This is equivalent to calling `bounce_set_core(get_core())`.
+   */
+  inline void set_default() noexcept {
+    ::bounce_set_core(&bounce_);
   }
 
   /**
@@ -490,11 +472,9 @@ protected:
 
   inline bounce_base() noexcept {
     ::bounce_init(&bounce_);
-    ::bounce_set_core(&bounce_);
   }
 
   inline ~bounce_base() noexcept {
-    ::bounce_set_core(nullptr);
     ::bounce_deinit(&bounce_);
   }
 
@@ -545,13 +525,11 @@ public:
    * @brief Park current thread and run continuation repeatedly.
    * @return True when succeeded continuation pumps.
    * @remarks The thread will block inside. Release when `shutdown()` called.
-   * While parked through this C++ wrapper, `get_current()` resolves to this
-   * core on the current thread or task.
+   * Call `set_default()` first when callbacks or coroutine helpers on this
+   * thread need `get_current()`.
    */
   inline bool park() noexcept {
-    return detail::park_with_current_core(
-      &bounce_,
-      [this]() noexcept { return ::bounce_park(&bounce_, 0u); });
+    return ::bounce_park(&bounce_, 0u);
   }
 
   /**
@@ -559,30 +537,23 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. While parked through this C++
-   * wrapper, `get_current()` resolves to this core on the current thread or
-   * task.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park(unsigned int max_inline_depth) noexcept {
-    return detail::park_with_current_core(
-      &bounce_,
-      [this, max_inline_depth]() noexcept {
-        return ::bounce_park(&bounce_, max_inline_depth);
-      });
+    return ::bounce_park(&bounce_, max_inline_depth);
   }
 
   /**
    * @brief Pump current thread once without waiting for new completion work.
    * @return True when succeeded continuation pumps.
    * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work. While
-   * parked through this C++ wrapper, `get_current()` resolves to this core on
-   * the current thread or task.
+   * dispatchable and then returns without blocking for future work. Call
+   * `set_default()` first when callbacks or coroutine helpers on this thread
+   * need `get_current()`.
    */
   inline bool park_once() noexcept {
-    return detail::park_with_current_core(
-      &bounce_,
-      [this]() noexcept { return ::bounce_park_once(&bounce_, 0u); });
+    return ::bounce_park_once(&bounce_, 0u);
   }
 
   /**
@@ -590,16 +561,11 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. While parked through this C++
-   * wrapper, `get_current()` resolves to this core on the current thread or
-   * task.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park_once(unsigned int max_inline_depth) noexcept {
-    return detail::park_with_current_core(
-      &bounce_,
-      [this, max_inline_depth]() noexcept {
-        return ::bounce_park_once(&bounce_, max_inline_depth);
-      });
+    return ::bounce_park_once(&bounce_, max_inline_depth);
   }
 
   /**
@@ -777,12 +743,12 @@ public:
 
 #include "timer.h"
 
-#if defined(BOUNCE_POSIX)
-#include "posix.h"
-#endif
-
 #if defined(BOUNCE_GENERIC)
 #include "generic.h"
+#endif
+
+#if defined(BOUNCE_POSIX)
+#include "posix.h"
 #endif
 
 #if defined(BOUNCE_POSIX_GLIB)

@@ -1,7 +1,7 @@
 #pragma once
 
-#ifndef LIBBOUNCE_EXAMPLES_POSIX_GLIB_EXAMPLE_APP_H
-#define LIBBOUNCE_EXAMPLES_POSIX_GLIB_EXAMPLE_APP_H
+#ifndef LIBBOUNCE_EXAMPLES_POSIX_IO_URING_GLIB_EXAMPLE_APP_H
+#define LIBBOUNCE_EXAMPLES_POSIX_IO_URING_GLIB_EXAMPLE_APP_H
 
 #if defined(__cplusplus)
 
@@ -11,7 +11,7 @@ namespace libbounce {
 class bounce;
 }
 
-namespace libbounce_example::posix_glib {
+namespace libbounce_example::posix_io_uring_glib {
 
 /**
  * @brief File name of the built GTK3 example executable.
@@ -19,12 +19,12 @@ namespace libbounce_example::posix_glib {
  * it synchronized with the build rules.
  */
 inline constexpr char example_executable_name[] =
-  "libbounce_posix_glib_gtk3_example";
+  "libbounce_posix_io_uring_glib_gtk3_example";
 
 /**
  * @brief Window title shown by the GTK3 example.
  */
-inline constexpr char window_title[] = "libbounce POSIX+GLib Example";
+inline constexpr char window_title[] = "libbounce POSIX+io_uring+GLib Example";
 
 /**
  * @brief Visible label of the only interactive control in the example UI.
@@ -42,7 +42,7 @@ inline constexpr char output_file_name[] = "sample.txt";
  * integration pattern rather than large-file throughput.
  */
 inline constexpr char sample_file_text[] =
-  "This file was written by the libbounce POSIX+GLib GTK3 example.\n";
+  "This file was written by the libbounce POSIX+io_uring+GLib GTK3 example.\n";
 
 /**
  * @brief Byte length of the sample file payload without the trailing NUL.
@@ -55,7 +55,7 @@ inline constexpr size_t sample_file_text_length = sizeof(sample_file_text) - 1u;
  * its own button after startup and closes the window after the write settles.
  */
 inline constexpr char automation_env_name[] =
-  "LIBBOUNCE_POSIX_GLIB_EXAMPLE_AUTOMATE";
+  "LIBBOUNCE_POSIX_IO_URING_GLIB_EXAMPLE_AUTOMATE";
 
 /**
  * @brief Run the minimal GTK3 + libbounce POSIX+GLib example application.
@@ -70,7 +70,7 @@ inline constexpr char automation_env_name[] =
  */
 int run(libbounce::bounce &bounce_instance, int *argc, char ***argv) noexcept;
 
-}  // namespace libbounce_example::posix_glib
+}  // namespace libbounce_example::posix_io_uring_glib
 
 #endif
 

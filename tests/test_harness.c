@@ -20,6 +20,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "libbounce/bounce.h"
+
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
@@ -36,6 +38,11 @@ typedef struct TEST_STDIO_REDIRECT {
   int stdout_copy;
   int stderr_copy;
 } TEST_STDIO_REDIRECT;
+
+static void test_reset_current_core_state(void) {
+  bounce_set_core(NULL);
+  bounce_set_fallback_core(NULL);
+}
 
 static int test_create_directory_single(const char *path) {
 #ifdef _WIN32
@@ -375,9 +382,11 @@ int test_run_suite(const char *suite_name, const TEST_CASE *cases, size_t case_c
       return 1;
     }
 
+    test_reset_current_core_state();
     started = test_monotonic_now();
     cases[index].function();
     finished = test_monotonic_now();
+    test_reset_current_core_state();
     test_restore_stdio(&redirect);
 
     duration_ms = test_elapsed_ms(started, finished);

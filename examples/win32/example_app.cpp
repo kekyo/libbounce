@@ -64,6 +64,8 @@ static bool build_output_path(
   return true;
 }
 
+/////////////////////////////////////////////////////////////////////////////
+
 /**
  * Return the UI to the idle state after the async write path settles.
  * The button is only re-enabled while the control still belongs to a live
@@ -77,27 +79,97 @@ static void finish_write(example_app *app) noexcept {
 }
 
 /**
+ * Write the whole payload, awaiting the OVERLAPPED completion event before
+ * every `WriteFile()` step.
+ */
+static libbounce::promise<bool> write_all_bytes_async(
+  libbounce::bounce_ref bounce_handle,
+  HANDLE file_handle,
+  const char *buffer,
+  size_t length) {
+  HANDLE signal_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+  if (signal_event == NULL) {
+    co_return false;
+  }
+
+  size_t written = 0u;
+  while (written < length) {
+    if (!ResetEvent(signal_event)) {
+      (void)CloseHandle(signal_event);
+      co_return false;
+    }
+
+    const size_t remaining_length = length - written;
+    const DWORD write_length =
+      remaining_length > (size_t)MAXDWORD ? MAXDWORD : (DWORD)remaining_length;
+    const unsigned long long file_offset = (unsigned long long)written;
+
+    OVERLAPPED overlapped {};
+    overlapped.hEvent = signal_event;
+    overlapped.Offset = (DWORD)(file_offset & 0xffffffffull);
+    overlapped.OffsetHigh = (DWORD)(file_offset >> 32);
+
+    // Do write
+    if (!WriteFile(
+          file_handle,
+          buffer + written,
+          write_length,
+          NULL,
+          &overlapped)) {
+      if (GetLastError() != ERROR_IO_PENDING) {
+        (void)CloseHandle(signal_event);
+        co_return false;
+      }
+    } else {
+      if (!SetEvent(signal_event)) {
+        (void)CloseHandle(signal_event);
+        co_return false;
+      }
+    }
+
+    // Asynchronous await wrote
+    auto await_result =
+      co_await bounce_handle.await(signal_event, nullptr);
+    if (!await_result.completed()) {
+      (void)CancelIoEx(file_handle, &overlapped);
+      (void)CloseHandle(signal_event);
+      co_return false;
+    }
+
+    DWORD bytes_written = 0u;
+    if (!GetOverlappedResult(file_handle, &overlapped, &bytes_written, FALSE)) {
+      (void)CloseHandle(signal_event);
+      co_return false;
+    }
+    if (bytes_written == 0u) {
+      (void)CloseHandle(signal_event);
+      co_return false;
+    }
+
+    written += (size_t)bytes_written;
+  }
+
+  (void)CloseHandle(signal_event);
+  co_return true;
+}
+
+/**
  * Write the sample file with native overlapped I/O and resume on libbounce.
  *
  * The sequence is:
  * 1. Create the destination file with `FILE_FLAG_OVERLAPPED`.
- * 2. Kick `WriteFile()` with an `OVERLAPPED` that owns a manual-reset event.
- * 3. Resolve the current parked bounce and hand that event HANDLE to
- *    `bounce.await(...)`.
- * 4. Close the wait handle and file handle after the await continuation runs.
+ * 2. Resolve the current parked bounce as `bounce_ref`.
+ * 3. `co_await` `write_all_bytes_async(...)` until the payload is fully written.
+ * 4. Close the file handle after the write coroutine settles.
  */
 static libbounce::promise<void> write_sample_file_async(example_app *app) {
   std::array<wchar_t, path_buffer_length> output_path {};
-  HANDLE file_handle = INVALID_HANDLE_VALUE;
-  HANDLE signal_event = NULL;
-  OVERLAPPED overlapped {};
-
   if (!build_output_path(output_path)) {
     finish_write(app);
     co_return;
   }
 
-  file_handle = CreateFileW(
+  HANDLE file_handle = CreateFileW(
     output_path.data(),
     GENERIC_WRITE,
     FILE_SHARE_READ,
@@ -110,59 +182,19 @@ static libbounce::promise<void> write_sample_file_async(example_app *app) {
     co_return;
   }
 
-  // The file handle itself is not directly awaitable here, so the OVERLAPPED
-  // event becomes the kernel object that libbounce waits on.
-  signal_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-  if (signal_event == NULL) {
-    (void)CloseHandle(file_handle);
-    finish_write(app);
-    co_return;
-  }
-
-  overlapped.hEvent = signal_event;
-  // `WriteFile()` either starts asynchronously and reports
-  // `ERROR_IO_PENDING`, or completes immediately. In the immediate-complete
-  // case we signal the event ourselves so the await path stays uniform.
-  if (!WriteFile(
-        file_handle,
-        sample_file_text,
-        (DWORD)sample_file_text_length,
-        NULL,
-        &overlapped)) {
-    if (GetLastError() != ERROR_IO_PENDING) {
-      (void)CloseHandle(signal_event);
-      (void)CloseHandle(file_handle);
-      finish_write(app);
-      co_return;
-    }
-  } else {
-    (void)SetEvent(signal_event);
-  }
-
   auto current_bounce = libbounce::bounce::get_current();
   if (!current_bounce) {
-    (void)CloseHandle(signal_event);
     (void)CloseHandle(file_handle);
     finish_write(app);
     co_return;
   }
 
-  auto result =
-    co_await current_bounce.await(signal_event, nullptr);
+  (void)co_await write_all_bytes_async(
+    current_bounce,
+    file_handle,
+    sample_file_text,
+    sample_file_text_length);
 
-  // If shutdown or another abort path wins, cancel the I/O so the handle can
-  // be released promptly. On success, query the completion result to finalize
-  // the OVERLAPPED operation before closing the file handle.
-  if (!result.completed()) {
-    (void)CancelIoEx(file_handle, &overlapped);
-  } else {
-    DWORD bytes_written = 0u;
-
-    (void)GetOverlappedResult(file_handle, &overlapped, &bytes_written, FALSE);
-    (void)bytes_written;
-  }
-
-  (void)CloseHandle(signal_event);
   (void)CloseHandle(file_handle);
   finish_write(app);
   co_return;
@@ -187,6 +219,8 @@ static void begin_write(example_app *app) noexcept {
     finish_write(app);
   }
 }
+
+/////////////////////////////////////////////////////////////////////////////
 
 /**
  * Minimal window procedure.
@@ -275,8 +309,10 @@ static bool register_window_class(HINSTANCE instance) noexcept {
 
 }  // namespace
 
-int run(HINSTANCE instance, int show_command) noexcept {
-  libbounce::bounce bounce_instance;
+int run(
+  libbounce::bounce &bounce_instance,
+  HINSTANCE instance,
+  int show_command) noexcept {
   example_app app;
 
   if (!register_window_class(instance)) {
@@ -322,9 +358,9 @@ int run(HINSTANCE instance, int show_command) noexcept {
   ShowWindow(app.window_handle, show_command);
   (void)UpdateWindow(app.window_handle);
 
-  // The GUI thread itself becomes the parker. The C++ wrapper publishes the
-  // current core while parked, so coroutine continuations and helper lookups
-  // on this thread stay bound to the same bounce instance.
+  // `main()` already published this bounce as the GUI thread default, so
+  // coroutine continuations and helper lookups on this thread resolve through
+  // the same bounce instance while the GUI thread is parked.
   (void)bounce_instance.park();
 
   return 0;

@@ -89,6 +89,11 @@ static_assert(
     libbounce::bounce_ref>::value,
   "libbounce::bounce::get_current must return bounce_ref");
 static_assert(
+  std::is_same<
+    decltype(std::declval<libbounce::bounce &>().set_default()),
+    void>::value,
+  "libbounce::bounce::set_default must return void");
+static_assert(
   std::is_constructible<
     libbounce::bounce_ref,
     libbounce::bounce_base_ref<BOUNCE_CORE>>::value,
@@ -212,6 +217,19 @@ static void test_assert_completion_on_current_executor(
   ASSERT_TRUE(test_cpp_runtime_completion_result(context) == result);
   ASSERT_TRUE(test_cpp_runtime_completion_has_executor(context));
   ASSERT_TRUE(test_cpp_runtime_completion_ran_on_current_executor(context));
+}
+
+static void test_assert_current_without_set_default(
+  libbounce::bounce *bounce_instance) {
+#if defined(BOUNCE_FREERTOS)
+  auto current = libbounce::bounce::get_current();
+
+  ASSERT_TRUE(current);
+  ASSERT_TRUE(current.get_core() == bounce_instance->get_core());
+#else
+  (void)bounce_instance;
+  ASSERT_TRUE(!libbounce::bounce::get_current());
+#endif
 }
 
 static void test_start_parker(
@@ -359,13 +377,18 @@ extern "C" void test_cpp_wrapper_post_runs(void) {
   libbounce::bounce bounce_instance;
   TEST_PARK_THREAD_CONTEXT park_context;
   TEST_COMPLETION_CONTEXT completion_context;
+
+  ::bounce_set_fallback_core(NULL);
+  ::bounce_set_core(NULL);
   test_start_parker(&bounce_instance, &park_context);
 
   test_completion_context_init(&completion_context);
   ASSERT_TRUE(
     bounce_instance.post(
-      test_cpp_completion_callback,
-      &completion_context));
+      [&bounce_instance, &completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_assert_current_without_set_default(&bounce_instance);
+        test_record_completion(&completion_context, result);
+      }));
   test_wait_completion_count(&completion_context, 1u);
   test_assert_completion_on_parker(
     &completion_context,
@@ -379,24 +402,34 @@ extern "C" void test_cpp_wrapper_park_once_post_runs(void) {
   libbounce::bounce bounce_instance;
   TEST_COMPLETION_CONTEXT completion_context;
 
+  ::bounce_set_fallback_core(NULL);
+  ::bounce_set_core(NULL);
   test_completion_context_init(&completion_context);
   ASSERT_TRUE(
     bounce_instance.post(
-      test_cpp_completion_callback,
-      &completion_context));
+      [&bounce_instance, &completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_assert_current_without_set_default(&bounce_instance);
+        test_record_completion(&completion_context, result);
+      }));
   ASSERT_TRUE(bounce_instance.park_once());
+  ASSERT_TRUE(!libbounce::bounce::get_current());
   test_assert_completion_on_current_executor(
     &completion_context,
     BOUNCE_COMPLETION_COMPLETED);
 }
 
-extern "C" void test_cpp_wrapper_attach_current_timeout_await_runs(void) {
+extern "C" void test_cpp_wrapper_set_default_timeout_await_runs(void) {
   libbounce::bounce bounce_instance;
   TEST_COMPLETION_CONTEXT completion_context;
   double started_ms;
 
   test_completion_context_init(&completion_context);
+  ::bounce_set_fallback_core(NULL);
+  ::bounce_set_core(NULL);
   ASSERT_TRUE(!libbounce::bounce::get_current());
+  bounce_instance.set_default();
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
 
   {
     libbounce::timer timer;
@@ -415,9 +448,11 @@ extern "C" void test_cpp_wrapper_attach_current_timeout_await_runs(void) {
 
     started_ms = test_cpp_monotonic_now_ms();
     while (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
-      ASSERT_TRUE(!libbounce::bounce::get_current());
+      ASSERT_TRUE(libbounce::bounce::get_current());
+      ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
       ASSERT_TRUE(bounce_instance.park_once());
-      ASSERT_TRUE(!libbounce::bounce::get_current());
+      ASSERT_TRUE(libbounce::bounce::get_current());
+      ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
       ASSERT_TRUE((test_cpp_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
       if (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
         test_cpp_yield_park_once_poll();
@@ -425,13 +460,16 @@ extern "C" void test_cpp_wrapper_attach_current_timeout_await_runs(void) {
     }
   }
 
-  ASSERT_TRUE(!libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
   test_assert_completion_on_current_executor(
     &completion_context,
     BOUNCE_COMPLETION_COMPLETED);
+  ::bounce_set_core(NULL);
+  ASSERT_TRUE(!libbounce::bounce::get_current());
 }
 
-extern "C" void test_cpp_wrapper_attach_current_restores_fallback_view(void) {
+extern "C" void test_cpp_wrapper_set_default_overrides_fallback_view(void) {
   libbounce::bounce bounce_instance;
   libbounce::bounce fallback_before;
   libbounce::bounce fallback_after;
@@ -445,6 +483,9 @@ extern "C" void test_cpp_wrapper_attach_current_restores_fallback_view(void) {
   ::bounce_set_fallback_core(fallback_before.get_core());
   ASSERT_TRUE(libbounce::bounce::get_current());
   ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_before.get_core());
+  bounce_instance.set_default();
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
 
   ASSERT_TRUE(
     bounce_instance.post(
@@ -460,12 +501,15 @@ extern "C" void test_cpp_wrapper_attach_current_restores_fallback_view(void) {
     &completion_context,
     BOUNCE_COMPLETION_COMPLETED);
   ASSERT_TRUE(libbounce::bounce::get_current());
-  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_before.get_core());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
 
   ::bounce_set_fallback_core(fallback_after.get_core());
   ASSERT_TRUE(libbounce::bounce::get_current());
-  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_after.get_core());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
 
+  ::bounce_set_core(NULL);
+  ASSERT_TRUE(libbounce::bounce::get_current());
+  ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_after.get_core());
   ::bounce_set_fallback_core(NULL);
   ASSERT_TRUE(!libbounce::bounce::get_current());
 }
@@ -629,14 +673,30 @@ extern "C" void test_cpp_wrapper_nested_post_inlines_with_park_ex(void) {
   test_stop_parker(&bounce_instance, &park_context);
 }
 
-extern "C" void test_cpp_wrapper_current_post_runs_on_attached_parker(void) {
+extern "C" void test_cpp_wrapper_current_post_runs_on_defaulted_parker(void) {
   libbounce::bounce bounce_instance;
   TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT setup_context;
   TEST_CPP_INLINE_POST_CONTEXT context{};
 
+  test_completion_context_init(&setup_context);
   test_completion_context_init(&context.outer);
   test_completion_context_init(&context.nested);
   test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(
+    bounce_instance.post(
+      [&bounce_instance, &setup_context](BOUNCE_COMPLETION_RESULT result) {
+        bounce_instance.set_default();
+        ASSERT_TRUE(libbounce::bounce::get_current());
+        ASSERT_TRUE(
+          libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
+        test_record_completion(&setup_context, result);
+      }));
+  test_wait_completion_count(&setup_context, 1u);
+  test_assert_completion_on_parker(
+    &setup_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
 
   ASSERT_TRUE(
     bounce_instance.post(

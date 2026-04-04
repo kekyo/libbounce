@@ -142,6 +142,56 @@ static bool test_read_file_contents(
            libbounce_example::win32::sample_file_text_length) == 0;
 }
 
+static bool test_write_file_contents(
+  const std::wstring &path,
+  const char *contents,
+  size_t length) {
+  HANDLE file_handle = CreateFileW(
+    path.c_str(),
+    GENERIC_WRITE,
+    FILE_SHARE_READ,
+    NULL,
+    CREATE_ALWAYS,
+    FILE_ATTRIBUTE_NORMAL,
+    NULL);
+
+  if (file_handle == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  DWORD bytes_written = 0u;
+  const BOOL write_result = WriteFile(
+    file_handle,
+    contents,
+    (DWORD)length,
+    &bytes_written,
+    NULL);
+
+  (void)CloseHandle(file_handle);
+  return (write_result != 0) && ((size_t)bytes_written == length);
+}
+
+static bool test_get_file_size(
+  const std::wstring &path,
+  LARGE_INTEGER *size) {
+  HANDLE file_handle = CreateFileW(
+    path.c_str(),
+    GENERIC_READ,
+    FILE_SHARE_READ | FILE_SHARE_WRITE,
+    NULL,
+    OPEN_EXISTING,
+    FILE_ATTRIBUTE_NORMAL,
+    NULL);
+
+  if (file_handle == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  const BOOL size_result = GetFileSizeEx(file_handle, size);
+  (void)CloseHandle(file_handle);
+  return size_result != 0;
+}
+
 static bool test_wait_for_sample_file(
   HANDLE process_handle,
   const std::wstring &sample_path,
@@ -177,6 +227,7 @@ extern "C" void test_win32_example_button_click_writes_sample_file(void) {
   std::wstring command_line;
   HWND window_handle = NULL;
   HWND button_handle = NULL;
+  LARGE_INTEGER sample_size {};
   bool created = false;
   bool success = false;
 
@@ -199,9 +250,12 @@ extern "C" void test_win32_example_button_click_writes_sample_file(void) {
     libbounce_example::win32::output_file_name);
   command_line = L"\"" + example_path + L"\"";
 
-  (void)DeleteFileW(sample_path.c_str());
-
   CHECK_TRUE(!runtime_directory.empty());
+  CHECK_TRUE(
+    test_write_file_contents(
+      sample_path,
+      "stale stale stale stale\r\n",
+      sizeof("stale stale stale stale\r\n") - 1u));
   CHECK_TRUE(
     CreateProcessW(
       example_path.c_str(),
@@ -235,6 +289,9 @@ extern "C" void test_win32_example_button_click_writes_sample_file(void) {
     process_info.hProcess,
     sample_path,
     test_timeout_ms));
+  CHECK_TRUE(test_get_file_size(sample_path, &sample_size));
+  CHECK_TRUE(
+    sample_size.QuadPart == (LONGLONG)libbounce_example::win32::sample_file_text_length);
 
   CHECK_TRUE(PostMessageW(window_handle, WM_CLOSE, 0u, 0u) != 0);
   CHECK_TRUE(WaitForSingleObject(process_info.hProcess, test_timeout_ms) == WAIT_OBJECT_0);

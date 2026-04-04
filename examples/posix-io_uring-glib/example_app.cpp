@@ -1,4 +1,8 @@
-#include "examples/posix-glib/example_app.h"
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include "examples/posix-io_uring-glib/example_app.h"
 
 #include <libbounce/promise.h>
 #include <libbounce/posix_glib.h>
@@ -6,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <gtk/gtk.h>
+#include <liburing.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +21,7 @@
 #include <array>
 #include <string>
 
-namespace libbounce_example::posix_glib {
+namespace libbounce_example::posix_io_uring_glib {
 namespace {
 
 // Keep path handling generous so deep build directories still fit.
@@ -64,7 +69,30 @@ static bool build_output_path(std::string &output_path) noexcept {
 /////////////////////////////////////////////////////////////////////////////
 
 /**
- * Write the whole payload, awaiting writability before every `write(2)` call.
+ * Prepare one `io_uring` write request from coroutine-owned state.
+ */
+struct write_request {
+  int fd = -1;
+  const char *buffer = nullptr;
+  size_t length = 0u;
+  off_t offset = 0;
+};
+
+static void prepare_write_request(
+  struct io_uring_sqe *sqe,
+  void *prepare_state) noexcept {
+  write_request *request = static_cast<write_request *>(prepare_state);
+
+  io_uring_prep_write(
+    sqe,
+    request->fd,
+    request->buffer,
+    request->length,
+    request->offset);
+}
+
+/**
+ * Write the whole payload through true async `io_uring` write submissions.
  */
 static libbounce::promise<bool> write_all_bytes_async(
   libbounce::bounce_ref bounce_handle,
@@ -72,28 +100,28 @@ static libbounce::promise<bool> write_all_bytes_async(
   const char *buffer,
   size_t length) {
   size_t written = 0u;
+
   while (written < length) {
-    // Asynchronous awaits writing ready
-    auto await_result =
-      co_await bounce_handle.await(fd, G_IO_OUT, nullptr);
+    write_request request {};
+    libbounce::io_uring_operation operation(
+      &prepare_write_request,
+      &request);
+    const size_t remaining = length - written;
+
+    request.fd = fd;
+    request.buffer = buffer + written;
+    request.length = remaining;
+    request.offset = (off_t)written;
+    const libbounce::await_result await_result =
+      co_await bounce_handle.await(*operation.get_operation(), nullptr);
     if (!await_result.completed()) {
       co_return false;
     }
 
-    // Do write
-    const ssize_t result = write(fd, buffer + written, length - written);
-
-    if (result < 0) {
-      if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-        continue;
-      }
+    if (operation.result() <= 0) {
       co_return false;
     }
-    if (result == 0) {
-      co_return false;
-    }
-
-    written += (size_t)result;
+    written += (size_t)operation.result();
   }
 
   co_return true;
@@ -116,17 +144,14 @@ static void finish_write(example_app *app, bool close_after_write) noexcept {
 
 /**
  * Open the destination fd and write the sample payload through awaitable
- * readiness steps.
+ * `io_uring` completions.
  *
  * The sequence is:
  * 1. Build the destination path next to the running executable.
  * 2. Open `sample.txt` for writing.
  * 3. Resolve the current parked bounce as `bounce_ref`.
- * 4. `co_await` writability before every `write(2)` call until the payload
+ * 4. `co_await` one `io_uring` write submission at a time until the payload
  *    is fully written.
- *
- * Regular files are usually writable immediately, so this example demonstrates
- * readiness-driven control flow rather than long-latency file completion.
  */
 static libbounce::promise<void> write_sample_file_async(example_app *app) {
   std::string output_path;
@@ -273,4 +298,4 @@ int run(libbounce::bounce &bounce_instance, int *argc, char ***argv) noexcept {
   return 0;
 }
 
-}  // namespace libbounce_example::posix_glib
+}  // namespace libbounce_example::posix_io_uring_glib

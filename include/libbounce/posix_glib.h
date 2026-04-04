@@ -66,6 +66,30 @@
 extern "C" {
 #endif
 
+#if defined(__linux__)
+struct __BOUNCE_POSIX_IO_URING_WAIT;
+struct io_uring;
+struct io_uring_sqe;
+
+typedef void (*BOUNCE_POSIX_IO_URING_PREPARE)(
+  struct io_uring_sqe *sqe,
+  void *prepare_state);
+
+/**
+ * @brief Caller-owned one-shot io_uring operation description.
+ * @remarks The caller initializes the prepare callback and storage before
+ * calling `bounce_await_posix_glib_io_uring_op()`. After completion,
+ * `result` and `cqe_flags` contain the terminal CQE data.
+ */
+typedef struct BOUNCE_POSIX_IO_URING_OP {
+  BOUNCE_POSIX_IO_URING_PREPARE prepare;
+  void *prepare_state;
+  int result;
+  unsigned int cqe_flags;
+  volatile int active;
+} BOUNCE_POSIX_IO_URING_OP;
+#endif
+
 /**
  * @brief Completion item stored in static bounce pools.
  */
@@ -82,6 +106,9 @@ typedef struct __BOUNCE_COMPLETION_ITEM {
   BOUNCE_CANCELLATION *cancellation;
   BOUNCE_CANCELLATION_REGISTRATION *registration_owner;
   GSource *source;
+#if defined(__linux__)
+  struct __BOUNCE_POSIX_IO_URING_WAIT *io_uring_wait;
+#endif
 } __BOUNCE_COMPLETION_ITEM;
 
 /**
@@ -137,6 +164,12 @@ struct BOUNCE_CORE {
   unsigned int active_watch_count;
   GMainContext *main_context;
   GSource *ready_source;
+#if defined(__linux__)
+  int io_uring_event_fd;
+  struct io_uring *io_uring_ring;
+  struct __BOUNCE_POSIX_IO_URING_WAIT *io_uring_waits;
+  GSource *io_uring_event_source;
+#endif
   BOUNCE_QUEUE ready_queue;
   BOUNCE_STACK free_items;
   BOUNCE_DYNAMIC_BLOCK_LIST dynamic_completion_blocks;
@@ -179,6 +212,28 @@ extern void bounce_await_posix_glib_fd(
   BOUNCE_COMPLETION completion,
   void *completion_state,
   BOUNCE_CANCELLATION *cancellation);
+
+#if defined(__linux__)
+extern void bounce_posix_io_uring_op_init(
+  BOUNCE_POSIX_IO_URING_OP *op,
+  BOUNCE_POSIX_IO_URING_PREPARE prepare,
+  void *prepare_state);
+
+extern void bounce_posix_io_uring_op_deinit(BOUNCE_POSIX_IO_URING_OP *op);
+
+extern int bounce_posix_io_uring_op_result(
+  const BOUNCE_POSIX_IO_URING_OP *op);
+
+extern unsigned int bounce_posix_io_uring_op_cqe_flags(
+  const BOUNCE_POSIX_IO_URING_OP *op);
+
+extern void bounce_await_posix_glib_io_uring_op(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_IO_URING_OP *op,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+#endif
 
 #ifdef __cplusplus
 }
@@ -285,6 +340,61 @@ public:
     int fd,
     GIOCondition condition,
     BOUNCE_CANCELLATION *cancellation) noexcept;
+#endif
+
+#if defined(__linux__)
+  /**
+   * @brief Await one io_uring operation completion on the current parked GLib
+   * thread.
+   * @param operation Caller-owned one-shot io_uring operation.
+   * @param completion Completion callback entry point.
+   * @param completion_state User provided completion callback state.
+   * @param cancellation Cancellation when provided.
+   */
+  inline void wait(
+    BOUNCE_POSIX_IO_URING_OP &operation,
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    ::bounce_await_posix_glib_io_uring_op(
+      this->get_core(),
+      &operation,
+      completion,
+      completion_state,
+      cancellation);
+  }
+
+  template<typename COMPLETION_TYPE>
+  inline bool wait(
+    BOUNCE_POSIX_IO_URING_OP &operation,
+    COMPLETION_TYPE&& completion,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    typedef typename std::decay<COMPLETION_TYPE>::type AWAIT_COMPLETION_TYPE;
+    std::unique_ptr<AWAIT_COMPLETION_TYPE> completion_state;
+
+    try {
+      completion_state.reset(
+        new AWAIT_COMPLETION_TYPE(std::forward<COMPLETION_TYPE>(completion)));
+    } catch (...) {
+      return false;
+    }
+
+    ::bounce_await_posix_glib_io_uring_op(
+      this->get_core(),
+      &operation,
+      &bounce_base<BOUNCE_CORE>::template callable_completion<AWAIT_COMPLETION_TYPE>,
+      completion_state.get(),
+      cancellation);
+
+    (void)completion_state.release();
+    return true;
+  }
+
+#if LIBBOUNCE_HAS_COROUTINE_SUPPORT
+  await_operation await(
+    BOUNCE_POSIX_IO_URING_OP &operation,
+    BOUNCE_CANCELLATION *cancellation) noexcept;
+#endif
 #endif
 };
 
@@ -416,7 +526,92 @@ public:
     GIOCondition condition,
     BOUNCE_CANCELLATION *cancellation) noexcept;
 #endif
+
+#if defined(__linux__)
+  inline void wait(
+    BOUNCE_POSIX_IO_URING_OP &operation,
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    ::bounce_await_posix_glib_io_uring_op(
+      this->get_core(),
+      &operation,
+      completion,
+      completion_state,
+      cancellation);
+  }
+
+  template<typename COMPLETION_TYPE>
+  inline bool wait(
+    BOUNCE_POSIX_IO_URING_OP &operation,
+    COMPLETION_TYPE&& completion,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    typedef typename std::decay<COMPLETION_TYPE>::type AWAIT_COMPLETION_TYPE;
+    std::unique_ptr<AWAIT_COMPLETION_TYPE> completion_state;
+
+    try {
+      completion_state.reset(
+        new AWAIT_COMPLETION_TYPE(std::forward<COMPLETION_TYPE>(completion)));
+    } catch (...) {
+      return false;
+    }
+
+    ::bounce_await_posix_glib_io_uring_op(
+      this->get_core(),
+      &operation,
+      &callable_completion<AWAIT_COMPLETION_TYPE>,
+      completion_state.get(),
+      cancellation);
+
+    (void)completion_state.release();
+    return true;
+  }
+
+#if LIBBOUNCE_HAS_COROUTINE_SUPPORT
+  await_operation await(
+    BOUNCE_POSIX_IO_URING_OP &operation,
+    BOUNCE_CANCELLATION *cancellation) noexcept;
+#endif
+#endif
 };
+
+#if defined(__linux__)
+class io_uring_operation {
+private:
+  BOUNCE_POSIX_IO_URING_OP operation_;
+  io_uring_operation(const io_uring_operation&) = delete;
+  io_uring_operation(io_uring_operation&&) = delete;
+  io_uring_operation& operator=(const io_uring_operation&) = delete;
+  io_uring_operation& operator=(io_uring_operation&&) = delete;
+
+public:
+  inline io_uring_operation(
+    BOUNCE_POSIX_IO_URING_PREPARE prepare,
+    void *prepare_state) noexcept {
+    ::bounce_posix_io_uring_op_init(&operation_, prepare, prepare_state);
+  }
+
+  ~io_uring_operation() {
+    ::bounce_posix_io_uring_op_deinit(&operation_);
+  }
+
+  inline BOUNCE_POSIX_IO_URING_OP *get_operation() noexcept {
+    return &operation_;
+  }
+
+  inline int result() const noexcept {
+    return ::bounce_posix_io_uring_op_result(&operation_);
+  }
+
+  inline unsigned int cqe_flags() const noexcept {
+    return ::bounce_posix_io_uring_op_cqe_flags(&operation_);
+  }
+
+  inline bool active() const noexcept {
+    return operation_.active != 0;
+  }
+};
+#endif
 
 /**
  * @brief Caller-owned backend-local timer storage for the C++ helper API.

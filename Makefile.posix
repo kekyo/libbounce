@@ -1,6 +1,9 @@
 CC ?= cc
+PKG_CONFIG ?= pkg-config
 BUILD_DIR ?= build/posix
 THREAD_FLAGS := -pthread
+LIBURING_CFLAGS := $(shell $(PKG_CONFIG) --cflags liburing 2>/dev/null)
+LIBURING_LIBS := $(shell $(PKG_CONFIG) --libs liburing 2>/dev/null)
 SOURCES := \
 	src/posix/bounce_tls_posix.c \
 	src/posix/bounce_posix.c \
@@ -20,9 +23,9 @@ TESTS = $(TEST_DIR)/test_posix$(EXE_EXT)
 SHARED_LIB = $(BUILD_DIR)/libbounce.so
 SHARED_OBJECTS = $(PIC_OBJECTS)
 PIC_CFLAGS := -fPIC
-PLATFORM_CPPFLAGS := -DBOUNCE_POSIX=1
-PLATFORM_LDLIBS :=
-SHARED_LDLIBS :=
+PLATFORM_CPPFLAGS := -DBOUNCE_POSIX=1 $(LIBURING_CFLAGS)
+PLATFORM_LDLIBS := $(LIBURING_LIBS)
+SHARED_LDLIBS := $(LIBURING_LIBS)
 
 include Makefile.common
 

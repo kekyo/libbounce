@@ -8,6 +8,10 @@
 #include <stddef.h>
 #include <windows.h>
 
+namespace libbounce {
+class bounce;
+}
+
 namespace libbounce_example::win32 {
 
 /**
@@ -52,14 +56,19 @@ inline constexpr size_t sample_file_text_length = sizeof(sample_file_text) - 1u;
 
 /**
  * @brief Run the minimal Win32 example application.
+ * @param bounce_instance Bounce instance already selected as the current
+ * default for the GUI thread.
  * @param instance Current process module instance.
  * @param show_command Initial show command passed from WinMain.
  * @return Process exit code.
- * @remarks This owns the example-local `libbounce::bounce`, creates the
+ * @remarks This uses the caller-owned `libbounce::bounce`, creates the
  * top-level window and button, parks the GUI thread inside `bounce.park()`,
  * and returns after a window close requests `bounce.shutdown()`.
  */
-int run(HINSTANCE instance, int show_command) noexcept;
+int run(
+  libbounce::bounce &bounce_instance,
+  HINSTANCE instance,
+  int show_command) noexcept;
 
 }  // namespace libbounce_example::win32
 
