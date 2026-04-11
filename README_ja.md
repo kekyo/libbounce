@@ -88,8 +88,10 @@ make -f Makefile.win32 all
 
 なお、追加の依存関係はバックエンドごとに異なります。
 
-- POSIX は `pthread` と `poll()` を使用します。
-- POSIX+GLib は `glib-2.0`, `gobject-2.0`, `gio-2.0` が必要です。
+- POSIX は fd 待機に `pthread` と `poll()` を使用します。Linux
+  ビルドでは、`io_uring` 待機のために `liburing` も必要です。
+- POSIX+GLib は `glib-2.0`, `gobject-2.0`, `gio-2.0` が必要です。Linux
+  ビルドでは、`io_uring` 待機のために `liburing` も必要です。
 - FreeRTOS は `Makefile.freertos` 実行時に `FreeRTOS-Kernel` を自動取得します。
 - Win32 テスト実行には MinGW-w64 の Win32-thread compiler と Wine が必要です。
 - Generic はライブラリ本体では標準C11機能のみを使用します。ホスト側テストでは `pthread` を使います。
@@ -616,8 +618,8 @@ bounce_deinit(&bounce);
 |プラットフォーム|ヘッダ|追加API|用途|
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|なし|backend 固有 wait を持たない、単一 parker・busy spin 前提の汎用コア|
-|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition も使える|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`|`GMainContext` / `GSource` に統合して fd readiness を待つ|
+|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition も使える。Linux では one-shot の `io_uring` 登録も待機可能|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|`GMainContext` / `GSource` に統合して fd readiness を待つ。Linux では `io_uring` 完了も同じ parked な GLib 文脈へ戻せる|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|タスク文脈・ISR文脈の両方から condition を通知できる|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|`BOUNCE_FREERTOS_ENABLE_FD_AWAIT` 有効時のみ fd readiness を待つ|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|イベントや waitable timer などの `HANDLE` を待つ|
@@ -631,9 +633,11 @@ bounce_deinit(&bounce);
 - POSIX:
   独自スレッドで `bounce_park()` させつつ、fd の readable / writable を待ちたい時に向いています。
   fd待機は `poll(2)` の `POLLIN`, `POLLOUT` などを使います。
+  Linux では同じ backend で one-shot の `io_uring` await も扱えます。
 - POSIX+GLib:
   既に GLib main loop を使っているアプリケーション向けです。
   ready queue は `GMainContext` 上の source として処理されるため、GLib 側の流儀に自然に統合できます。
+  Linux では `io_uring` 完了も同じ `GMainContext` へ橋渡しされます。
 - FreeRTOS:
   task を parker として動かし、軽量な condition 通知やタイマーを扱うのに向いています。
   `raise_from_isr()` があるため、ISR から安全に継続をスケジュールできます。
@@ -668,8 +672,8 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 |バックエンド|追加される主な型/メソッド|
 |:----|:----|
 |Generic|backend 固有の追加 wait はなし。`post()` と `libbounce::timer` を使う|
-|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`|
+|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`|
@@ -710,6 +714,72 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 ---
 
 ## 各プラットフォーム毎の注意点
+
+### Linux `io_uring`
+
+`io_uring` サポートは、Linux 向けの POSIX / POSIX+GLib backend でのみ利用できます。
+libbounce 側の統合は意図的に絞ってあり、1 回の await が 1 個の
+caller-owned `BOUNCE_POSIX_IO_URING_OP` に対応し、prepare callback が
+1 個の SQE を組み立て、CQE 到着後の継続は従来どおり parker
+スレッド、または parked な GLib 文脈上で再開されます。
+
+C API では `bounce_posix_io_uring_op_init()` で操作記述子を初期化し、
+`bounce_await_posix_io_uring_op()` または
+`bounce_await_posix_glib_io_uring_op()` で登録し、
+完了後に `bounce_posix_io_uring_op_result()` と
+`bounce_posix_io_uring_op_cqe_flags()` から最終 CQE 情報を取得します。
+C++ ヘッダでは、同じ用途の薄い RAII ラッパーとして
+`libbounce::io_uring_operation` が用意されています。
+operation は one-shot なので、送信ごとに新しい operation を作るか、
+前回分の settle を待ってから同じ領域を再利用してください。
+GLib backend を使う場合は `libbounce/posix_glib.h` を include し、
+その backend の `libbounce::bounce` に対して同じ await パターンを使います。
+
+```cpp
+#include <liburing.h>
+#include <sys/types.h>
+#include <libbounce/promise.h>
+#include <libbounce/posix.h>
+
+struct read_request {
+  int fd;
+  void *buffer;
+  unsigned int length;
+  off_t offset;
+};
+
+static void prepare_read(struct io_uring_sqe *sqe, void *state) noexcept {
+  auto *request = static_cast<read_request *>(state);
+
+  io_uring_prep_read(
+    sqe,
+    request->fd,
+    request->buffer,
+    request->length,
+    request->offset);
+}
+
+static libbounce::promise<void> read_once(
+  libbounce::bounce &bounce,
+  int fd,
+  void *buffer,
+  unsigned int length) {
+  read_request request { fd, buffer, length, 0 };
+  libbounce::io_uring_operation operation(&prepare_read, &request);
+  const libbounce::await_result result =
+    co_await bounce.await(*operation.get_operation(), nullptr);
+
+  if (result.completed() && (operation.result() >= 0)) {
+    /* operation.result() には CQE の res が入る */
+  }
+}
+```
+
+キャンセルの扱いは他の待機と同じで、
+`BOUNCE_CANCELLATION*` / `libbounce::cancellation` を渡せば、
+中断時は `BOUNCE_COMPLETION_CANCELED` / `canceled()` で解決されます。
+`io_uring` と coroutine と GTK3 をまとめたエンドツーエンドの例として、
+[`examples/posix-io_uring-glib/`](./examples/posix-io_uring-glib/) も参照してください。
 
 ### POSIX+GLib
 

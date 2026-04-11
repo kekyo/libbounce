@@ -99,8 +99,10 @@ The required source file combinations can be taken directly from each
 
 Note that additional dependencies vary by backend.
 
-- POSIX uses `pthread` and `poll()`.
-- POSIX+GLib requires `glib-2.0`, `gobject-2.0`, and `gio-2.0`.
+- POSIX uses `pthread` and `poll()` for fd waits. Linux builds also require
+  `liburing` for `io_uring` waits.
+- POSIX+GLib requires `glib-2.0`, `gobject-2.0`, and `gio-2.0`. Linux builds
+  also require `liburing` for `io_uring` waits.
 - FreeRTOS automatically fetches `FreeRTOS-Kernel` when you run
   `Makefile.freertos`.
 - Running Win32 tests requires MinGW-w64 Win32-thread compilers and Wine.
@@ -115,6 +117,7 @@ $ sudo dpkg --add-architecture i386
 $ echo "deb [trusted=yes] https://dl.espressif.com/dl/eim/apt/ stable main" | sudo tee /etc/apt/sources.list.d/espressif.list
 $ sudo apt update
 $ sudo apt install build-essential pkg-config libglib2.0-dev \
+    liburing-dev \
     nodejs \
     gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 \
     gcc-mingw-w64-i686-win32 g++-mingw-w64-i686-win32 \
@@ -677,8 +680,8 @@ Each backend adds its own wait targets and helper types.
 |Platform|Header|Additional API|Purpose|
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|None|Single-parker generic core with busy-spin parking and timer polling, without backend-specific wait targets|
-|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`|Wait for fd readiness based on `poll()`. A lightweight one-shot condition is also available|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`|Wait for fd readiness integrated with `GMainContext` / `GSource`|
+|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|Wait for fd readiness based on `poll()`. A lightweight one-shot condition is also available. Linux can also await one-shot `io_uring` submissions|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. Linux can also forward `io_uring` completions back into the same parked GLib context|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|Notify a condition from both task context and ISR context|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|Wait for fd readiness only when `BOUNCE_FREERTOS_ENABLE_FD_AWAIT` is enabled|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|Wait on `HANDLE`s such as events and waitable timers|
@@ -694,10 +697,13 @@ The intended usage for each backend is as follows.
   Suitable when you want to run `bounce_park()` on a dedicated thread while
   waiting for fd readability or writability.
   fd waiting uses `poll(2)` events such as `POLLIN` and `POLLOUT`.
+  On Linux, the same backend also accepts one-shot `io_uring` awaits.
 - POSIX+GLib:
   Intended for applications that already use the GLib main loop.
   The ready queue is processed as a source on `GMainContext`, so it integrates
   naturally with the GLib model.
+  On Linux, `io_uring` completions are also bridged back into that same
+  `GMainContext`.
 - FreeRTOS:
   Suitable when running a task as a parker and handling lightweight condition
   notifications or timers.
@@ -737,8 +743,8 @@ The backend-specific differences are mostly in the arguments of `wait(...)`,
 |Backend|Main additional types / methods|
 |:----|:----|
 |Generic|No additional backend-local wait methods. Use `post()` and `libbounce::timer`|
-|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`|
+|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`|
@@ -783,6 +789,73 @@ destroying a started but unfinished promise is a programming error.
 ---
 
 ## Platform Notes
+
+### Linux `io_uring`
+
+`io_uring` support is available only on Linux builds of the POSIX and
+POSIX+GLib backends.
+libbounce keeps the integration intentionally small: one await corresponds to
+one caller-owned `BOUNCE_POSIX_IO_URING_OP`, your prepare callback fills one
+SQE, and the completion still resumes on the parked thread or the parked GLib
+context.
+
+In the C API, initialize the operation with `bounce_posix_io_uring_op_init()`,
+register it with `bounce_await_posix_io_uring_op()` or
+`bounce_await_posix_glib_io_uring_op()`, and read the terminal CQE data through
+`bounce_posix_io_uring_op_result()` and
+`bounce_posix_io_uring_op_cqe_flags()`.
+The C++ headers provide the thin RAII wrapper
+`libbounce::io_uring_operation` for the same pattern.
+Operations are one-shot, so create a fresh operation per submission or wait
+until the previous one has settled before reusing its storage.
+When you use the GLib backend, include `libbounce/posix_glib.h` and call the
+same await pattern on that backend's `libbounce::bounce`.
+
+```cpp
+#include <liburing.h>
+#include <sys/types.h>
+#include <libbounce/promise.h>
+#include <libbounce/posix.h>
+
+struct read_request {
+  int fd;
+  void *buffer;
+  unsigned int length;
+  off_t offset;
+};
+
+static void prepare_read(struct io_uring_sqe *sqe, void *state) noexcept {
+  auto *request = static_cast<read_request *>(state);
+
+  io_uring_prep_read(
+    sqe,
+    request->fd,
+    request->buffer,
+    request->length,
+    request->offset);
+}
+
+static libbounce::promise<void> read_once(
+  libbounce::bounce &bounce,
+  int fd,
+  void *buffer,
+  unsigned int length) {
+  read_request request { fd, buffer, length, 0 };
+  libbounce::io_uring_operation operation(&prepare_read, &request);
+  const libbounce::await_result result =
+    co_await bounce.await(*operation.get_operation(), nullptr);
+
+  if (result.completed() && (operation.result() >= 0)) {
+    /* operation.result() is the CQE res value */
+  }
+}
+```
+
+Cancellation works the same way as other waits: pass
+`BOUNCE_CANCELLATION*` / `libbounce::cancellation`, and a canceled operation
+resolves as `BOUNCE_COMPLETION_CANCELED` / `canceled()`.
+For an end-to-end sample that integrates `io_uring`, coroutines, and GTK3,
+see [`examples/posix-io_uring-glib/`](./examples/posix-io_uring-glib/).
 
 ### POSIX+GLib
 
