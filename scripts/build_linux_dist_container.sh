@@ -113,6 +113,7 @@ apt-get install -y --no-install-recommends \
 	ca-certificates \
 	dpkg-dev \
 	libglib2.0-dev \
+	liburing-dev \
 	pkg-config
 
 require_command make

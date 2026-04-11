@@ -70,7 +70,7 @@ make -f Makefile.posix_glib all
 make -f Makefile.freertos test
 
 # Win32 cross build
-make -f Makefile.win32 all CC=x86_64-w64-mingw32-gcc-win32
+make -f Makefile.win32 all
 ```
 
 テストを含めて一通り確認したい場合は、以下のスクリプトが使えます。
@@ -88,8 +88,10 @@ make -f Makefile.win32 all CC=x86_64-w64-mingw32-gcc-win32
 
 なお、追加の依存関係はバックエンドごとに異なります。
 
-- POSIX は `pthread` と `poll()` を使用します。
-- POSIX+GLib は `glib-2.0`, `gobject-2.0`, `gio-2.0` が必要です。
+- POSIX は fd 待機に `pthread` と `poll()` を使用します。Linux
+  ビルドでは、`io_uring` 待機のために `liburing` も必要です。
+- POSIX+GLib は `glib-2.0`, `gobject-2.0`, `gio-2.0` が必要です。Linux
+  ビルドでは、`io_uring` 待機のために `liburing` も必要です。
 - FreeRTOS は `Makefile.freertos` 実行時に `FreeRTOS-Kernel` を自動取得します。
 - Win32 テスト実行には MinGW-w64 の Win32-thread compiler と Wine が必要です。
 - Generic はライブラリ本体では標準C11機能のみを使用します。ホスト側テストでは `pthread` を使います。
@@ -101,11 +103,8 @@ libbounce全体の開発ビルドは、以下の手順で行います。まず�
 $ sudo dpkg --add-architecture i386
 $ echo "deb [trusted=yes] https://dl.espressif.com/dl/eim/apt/ stable main" | sudo tee /etc/apt/sources.list.d/espressif.list
 $ sudo apt update
-$ sudo apt install build-essential pkg-config libglib2.0-dev \
-    nodejs \
-    gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 \
-    gcc-mingw-w64-i686-win32 g++-mingw-w64-i686-win32 \
-    wine wine64 wine32:i386 podman
+$ sudo apt install build-essential g++-mingw-w64 pkg-config libglib2.0-dev liburing-dev \
+    nodejs wine wine64 wine32:i386 podman
 $ sudo apt install eim-cli
 $ eim install
 ```
@@ -211,7 +210,7 @@ int main(void) {
   /* ------------------------------------- */
 
   /* libboundのシャットダウンを開始する */
-  bounce_shutdown(&bounce);
+  bounce_shutdown(&bounce, false);
 
   /* ... (パーキングスレッドが終了するのを待機) */
 
@@ -226,7 +225,7 @@ int main(void) {
 1. `bounce_init()` でコアを初期化する。
 2. 1本以上のスレッドまたはタスクで `bounce_park()` を開始する。
 3. 他の文脈から `bounce_post()` や await API を登録する。
-4. 停止時に `bounce_shutdown()` を呼び、パーキングを解除する。
+4. 停止時に `bounce_shutdown(..., false)` を呼び、パーキングを解除する。
 5. すべての parker の終了を確認してから `bounce_deinit()` する。
 
 `bounce_park()` は停止要求が来るまで内部で待機し続けます。
@@ -252,9 +251,12 @@ TLS に core が登録されていない場合、`bounce_get_core()` は
 といった用途がある場合は、あらかじめ `bounce_set_core()` を呼んでおく必要があります。
 
 これは特に、コールバックチェインの途中で次の非同期処理を登録したい場合や、
-C++ 側で `libbounce::bounce::current()` や coroutine 継続復帰先の解決に
+C++ 側で `libbounce::bounce::get_current()` や coroutine 継続復帰先の解決に
 現在の core を使いたい場合に意味があります。
 逆に、常に `BOUNCE_CORE*` を明示的に受け渡す設計なら必須ではありません。
+一方、C++ API には現在スレッド/タスクに対して
+`bounce_set_core(bounce.get_core())` を行う薄いラッパー
+`bounce.set_default()` があります。
 
 以下は、継続の中で `bounce_get_core()` を使って次の継続を連鎖させる例です。
 
@@ -305,6 +307,7 @@ static void *parker_thread(void *state) {
 個々の待機要求を途中で止めたい場合は、`bounce_shutdown()` ではなく
 `BOUNCE_CANCELLATION` を使います。
 `bounce_shutdown()` は parker 全体の停止要求であり、ライブラリ全体を畳む時の操作です。
+既に登録済みの待機を消化してから抜けたい時は `wait_for_idle=true` を指定します。
 一方、キャンセルは「この待機だけを取り下げたい」という用途に使います。
 
 使い方は次の通りです。
@@ -521,28 +524,28 @@ bounce.shutdown();
 parker.join();
 ```
 
-また、`attach_current()` を使うと、そのスレッドのTLSへ現在の bounce を一時的に公開できます。
-これにより、`libbounce::bounce::current()` から `bounce_ref` を取得できるようになります。
+また、現在スレッド/タスクで
+`libbounce::bounce::get_current()` から非所有の `bounce_ref` を取得したい場合は、
+`park()` / `park_once()` の前に明示的に `set_default()` を呼びます。
 
 ```cpp
 /* bounce core を所有する */
 libbounce::bounce bounce;
-/* 他のヘルパー型も通常の自動変数として保持できる */
-libbounce::timer timer;
+/* 現在スレッド/タスクへ公開する */
+bounce.set_default();
+/* parker 上で動く継続を登録する */
+(void)bounce.post([] {
+  /* TLS から current core を参照する */
+  auto current = libbounce::bounce::get_current();
 
-{
-  /* 現在スレッドに bounce を一時的にアタッチする */
-  auto attachment = bounce.attach_current();
-  /* TLS から現在の bounce 参照を取得する */
-  auto current = libbounce::bounce::current();
-
-  /* 現在の bounce が取得できたら、その参照経由で継続を登録できる */
-  if (current.has_value()) {
-    (void)current->post([] {
-      /* current() から得た bounce_ref 経由の継続処理 */
+  /* current が取得できたら、その参照経由で継続を登録できる */
+  if (current) {
+    (void)current.post([] {
+      /* get_current() から得た bounce_ref 経由の継続処理 */
     });
   }
-}
+});
+(void)bounce.park_once();
 ```
 
 ライブラリ内部やコールバックチェインの中で「明示的に参照を渡したくないが、現在の bounce は取得したい」という場面で役に立ちます。
@@ -561,7 +564,7 @@ libbounce::timer timer;
 |`bounce_post()`|継続処理を ready queue に積み、parker 上で実行させる|
 |`bounce_park()`|現在スレッド/タスクを parker として待機させる|
 |`bounce_park_once()`|現在 dispatch 可能な継続だけを1回処理して戻る|
-|`bounce_shutdown()`|すべての parker に停止要求を出す|
+|`bounce_shutdown()`|すべての parker に停止要求を出す。必要なら pending wait 消化後に抜ける|
 |`bounce_set_core()` / `bounce_get_core()` / `bounce_set_fallback_core()`|現在スレッド/タスクに対応する core を公開・取得し、必要ならプロセス共通フォールバックも使う|
 |`bounce_cancellation_*()`|キャンセルソースの初期化・発行・破棄|
 |`bounce_register_canceled()` / `bounce_unregister_canceled()`|キャンセル時継続の登録・解除|
@@ -615,8 +618,8 @@ bounce_deinit(&bounce);
 |プラットフォーム|ヘッダ|追加API|用途|
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|なし|backend 固有 wait を持たない、単一 parker・busy spin 前提の汎用コア|
-|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition も使える|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`|`GMainContext` / `GSource` に統合して fd readiness を待つ|
+|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition も使える。Linux では one-shot の `io_uring` 登録も待機可能|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|`GMainContext` / `GSource` に統合して fd readiness を待つ。Linux では `io_uring` 完了も同じ parked な GLib 文脈へ戻せる|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|タスク文脈・ISR文脈の両方から condition を通知できる|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|`BOUNCE_FREERTOS_ENABLE_FD_AWAIT` 有効時のみ fd readiness を待つ|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|イベントや waitable timer などの `HANDLE` を待つ|
@@ -630,9 +633,11 @@ bounce_deinit(&bounce);
 - POSIX:
   独自スレッドで `bounce_park()` させつつ、fd の readable / writable を待ちたい時に向いています。
   fd待機は `poll(2)` の `POLLIN`, `POLLOUT` などを使います。
+  Linux では同じ backend で one-shot の `io_uring` await も扱えます。
 - POSIX+GLib:
   既に GLib main loop を使っているアプリケーション向けです。
   ready queue は `GMainContext` 上の source として処理されるため、GLib 側の流儀に自然に統合できます。
+  Linux では `io_uring` 完了も同じ `GMainContext` へ橋渡しされます。
 - FreeRTOS:
   task を parker として動かし、軽量な condition 通知やタイマーを扱うのに向いています。
   `raise_from_isr()` があるため、ISR から安全に継続をスケジュールできます。
@@ -654,21 +659,21 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 
 |型/メソッド|役割|
 |:----|:----|
-|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `park()`, `park_once()`, `shutdown()`, `attach_current()` を持つ|
-|`libbounce::bounce::current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `std::optional<bounce_ref>` として取得する|
-|`libbounce::bounce_ref`|非所有参照。既にどこかで管理している core に対して `post()`, `park()`, `shutdown()` などを行う|
+|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `set_default()`, `park()`, `park_once()`, `shutdown()` を持つ|
+|`libbounce::bounce::get_current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `bounce_ref` として取得する|
+|`libbounce::bounce_base_ref`|共通の非所有参照。既にどこかで管理している core に対して `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()` などを行う|
+|`libbounce::bounce_ref`|backend 固有の非所有参照。`bounce_base_ref` を拡張し、必要なら backend 固有 helper を持つ|
 |`libbounce::timer`|`BOUNCE_TIMER` の RAII ラッパー。`wait(bounce, duration_msec, ...)` でタイマー待機を登録する|
 |`libbounce::cancellation`|`BOUNCE_CANCELLATION` の RAII ラッパー。`cancel(bounce)` でキャンセルを発行する|
 |`libbounce::cancellation_registration`|キャンセル時継続の RAII ラッパー。`register_canceled(...)` と `unregister()` を持つ|
-|`attach_current()`|スコープの間だけ現在スレッド/タスクへ core を TLS アタッチし、破棄時に元へ戻す|
 
 バックエンドごとの差分は主に `wait(...)`, `raise(...)`, `await(...)` の引数です。
 
 |バックエンド|追加される主な型/メソッド|
 |:----|:----|
 |Generic|backend 固有の追加 wait はなし。`post()` と `libbounce::timer` を使う|
-|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`|
+|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`|
@@ -708,6 +713,134 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 
 ---
 
+## 各プラットフォーム毎の注意点
+
+### Linux `io_uring`
+
+`io_uring` サポートは、Linux 向けの POSIX / POSIX+GLib backend でのみ利用できます。
+libbounce 側の統合は意図的に絞ってあり、1 回の await が 1 個の
+caller-owned `BOUNCE_POSIX_IO_URING_OP` に対応し、prepare callback が
+1 個の SQE を組み立て、CQE 到着後の継続は従来どおり parker
+スレッド、または parked な GLib 文脈上で再開されます。
+
+C API では `bounce_posix_io_uring_op_init()` で操作記述子を初期化し、
+`bounce_await_posix_io_uring_op()` または
+`bounce_await_posix_glib_io_uring_op()` で登録し、
+完了後に `bounce_posix_io_uring_op_result()` と
+`bounce_posix_io_uring_op_cqe_flags()` から最終 CQE 情報を取得します。
+C++ ヘッダでは、同じ用途の薄い RAII ラッパーとして
+`libbounce::io_uring_operation` が用意されています。
+operation は one-shot なので、送信ごとに新しい operation を作るか、
+前回分の settle を待ってから同じ領域を再利用してください。
+GLib backend を使う場合は `libbounce/posix_glib.h` を include し、
+その backend の `libbounce::bounce` に対して同じ await パターンを使います。
+
+```cpp
+#include <liburing.h>
+#include <sys/types.h>
+#include <libbounce/promise.h>
+#include <libbounce/posix.h>
+
+struct read_request {
+  int fd;
+  void *buffer;
+  unsigned int length;
+  off_t offset;
+};
+
+static void prepare_read(struct io_uring_sqe *sqe, void *state) noexcept {
+  auto *request = static_cast<read_request *>(state);
+
+  io_uring_prep_read(
+    sqe,
+    request->fd,
+    request->buffer,
+    request->length,
+    request->offset);
+}
+
+static libbounce::promise<void> read_once(
+  libbounce::bounce &bounce,
+  int fd,
+  void *buffer,
+  unsigned int length) {
+  read_request request { fd, buffer, length, 0 };
+  libbounce::io_uring_operation operation(&prepare_read, &request);
+  const libbounce::await_result result =
+    co_await bounce.await(*operation.get_operation(), nullptr);
+
+  if (result.completed() && (operation.result() >= 0)) {
+    /* operation.result() には CQE の res が入る */
+  }
+}
+```
+
+キャンセルの扱いは他の待機と同じで、
+`BOUNCE_CANCELLATION*` / `libbounce::cancellation` を渡せば、
+中断時は `BOUNCE_COMPLETION_CANCELED` / `canceled()` で解決されます。
+`io_uring` と coroutine と GTK3 をまとめたエンドツーエンドの例として、
+[`examples/posix-io_uring-glib/`](./examples/posix-io_uring-glib/) も参照してください。
+
+### POSIX+GLib
+
+GTK など、既に GLib main loop を持っているアプリケーションで
+libbounce の POSIX+GLib backend を使う場合は、その既存の
+`GMainContext` を `bounce` 側へ渡して初期化し、
+`gtk_main()` を別に回さず `bounce_park()` を唯一の待機ループにします。
+
+C API では
+`bounce_init_with_main_context(&bounce, g_main_context_default())`
+を使い、C++ ヘルパーでは
+`libbounce::bounce bounce(g_main_context_default())`
+を使います。
+`NULL` を渡した場合は従来どおり private な `GMainContext` を生成します。
+
+重要なのは、GUI スレッドでブロッキングするのは `bounce_park()` だけにすることです。
+`gtk_main()` を別に呼ぶと、GTK と libbounce が別々の dispatch loop を回すことになります。
+
+以下は、GTK3 と一緒に使う場合の簡略化した `main()` の形です。
+
+```cpp
+#include <gtk/gtk.h>
+#include <libbounce/posix_glib.h>
+
+static void on_destroy(GtkWidget *widget, gpointer user_data) {
+  auto *bounce = static_cast<libbounce::bounce *>(user_data);
+
+  (void)widget;
+  bounce->shutdown();
+}
+
+int main(int argc, char **argv) {
+  gtk_init(&argc, &argv);
+
+  libbounce::bounce bounce(g_main_context_default());
+  GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+
+  gtk_window_set_title(GTK_WINDOW(window), "example");
+  g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), &bounce);
+  gtk_widget_show_all(window);
+
+  (void)bounce.park();
+  return 0;
+}
+```
+
+C API だけを使う場合の初期化は次の通りです。
+
+```c
+gtk_init(&argc, &argv);
+BOUNCE_CORE bounce;
+bounce_init_with_main_context(&bounce, g_main_context_default());
+```
+
+callback や helper から C API の `bounce_get_core()` が必要なら、
+`bounce_park()` へ入る前に `bounce_set_core()` で current core を公開してください。
+C++ API では、現在スレッド/タスクで `get_current()` を使いたい場合に
+`bounce.park()` / `bounce.park_once()` の前で `bounce.set_default()` を呼びます。
+
+---
+
 ## パッケージ生成
 
 `libbounce` には、`libdispatcher` と同様の流れで配布物を生成する `build_pack.sh` が含まれます。
@@ -723,8 +856,7 @@ sudo apt install ./screw-up-native-ubuntu-noble-amd64-0.1.0.deb
 続いて、パッケージ生成に必要なツールを導入します。
 
 ```bash
-sudo apt install podman qemu-user-static zip \
-  gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-i686-win32
+sudo apt install podman qemu-user-static zip g++-mingw-w64 wine wine64
 ```
 
 すべての対応成果物を生成するには、次を実行します。

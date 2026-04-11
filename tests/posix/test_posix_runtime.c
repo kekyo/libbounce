@@ -327,7 +327,7 @@ bool test_posix_freertos_runtime_start_parker_ex(
     return false;
   }
   if (!test_posix_runtime_wait_for_started(parker, timeout_ms)) {
-    bounce_shutdown(bounce);
+    bounce_shutdown(bounce, false);
     (void)pthread_join(parker->thread, NULL);
     test_posix_runtime_destroy_parker(parker);
     return false;
@@ -339,7 +339,7 @@ bool test_posix_freertos_runtime_stop_parker(
   BOUNCE_CORE *bounce,
   TEST_POSIX_FREERTOS_RUNTIME_PARKER *parker,
   unsigned int timeout_ms) {
-  bounce_shutdown(bounce);
+  bounce_shutdown(bounce, false);
   if (!test_posix_runtime_wait_for_finished(parker, timeout_ms)) {
     return false;
   }
@@ -355,7 +355,7 @@ bool test_posix_freertos_runtime_stop_parkers(
   TEST_POSIX_FREERTOS_RUNTIME_PARKER *parkers,
   size_t parker_count,
   unsigned int timeout_ms) {
-  bounce_shutdown(bounce);
+  bounce_shutdown(bounce, false);
 
   for (size_t index = 0u; index < parker_count; index++) {
     if (!test_posix_runtime_wait_for_finished(&parkers[index], timeout_ms)) {

@@ -108,8 +108,11 @@ extern bool bounce_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth);
 /**
  * @brief Shutdown parking threads.
  * @param r Initialized BOUNCE_CORE.
+ * @param wait_for_idle When true, parked threads or tasks keep running until
+ * all already-pending wait operations settle. When false, they may leave even
+ * while wait operations are still pending.
  */
-extern void bounce_shutdown(BOUNCE_CORE *r);
+extern void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle);
 
 /**
  * @brief Deinitialize the bounce.
@@ -238,57 +241,20 @@ template<typename T = void> class promise;
 
 template <typename TBOUNCE_CORE> class bounce_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_TIMER> class timer_base;
+template <typename TBOUNCE_CORE> class bounce_base_ref;
 
-template <typename TBOUNCE_CORE> class core_attachment_base {
-private:
-  TBOUNCE_CORE *previous_core_;
-  bool active_;
-  core_attachment_base(const core_attachment_base&) = delete;
-  core_attachment_base& operator=(const core_attachment_base&) = delete;
+/**
+ * @brief Non-owning bounce reference shared by backend-specific handles.
+ * @tparam TBOUNCE_CORE Backend bounce core storage type.
+ */
+template <typename TBOUNCE_CORE> class bounce_base_ref {
+  template<typename> friend class bounce_base;
 
-public:
-  explicit inline core_attachment_base(TBOUNCE_CORE *core) noexcept
-    : previous_core_(static_cast<TBOUNCE_CORE *>(::bounce_get_core())),
-      active_(true) {
-    ::bounce_set_core(nullptr);
-    if (static_cast<TBOUNCE_CORE *>(::bounce_get_core()) == previous_core_) {
-      previous_core_ = nullptr;
-    }
-    ::bounce_set_core(core);
-  }
-  inline core_attachment_base(core_attachment_base&& other) noexcept
-    : previous_core_(other.previous_core_),
-      active_(other.active_) {
-    other.previous_core_ = nullptr;
-    other.active_ = false;
-  }
-
-  inline core_attachment_base& operator=(core_attachment_base&& other) noexcept {
-    if (this != &other) {
-      if (active_) {
-        ::bounce_set_core(previous_core_);
-      }
-      previous_core_ = other.previous_core_;
-      active_ = other.active_;
-      other.previous_core_ = nullptr;
-      other.active_ = false;
-    }
-    return *this;
-  }
-
-  inline ~core_attachment_base() noexcept {
-    if (active_) {
-      ::bounce_set_core(previous_core_);
-    }
-  }
-};
-
-template <typename TBOUNCE_CORE> class bounce_ref_base {
 private:
   TBOUNCE_CORE *bounce_;
 
 protected:
-  explicit inline bounce_ref_base(TBOUNCE_CORE *bounce) noexcept
+  explicit inline bounce_base_ref(TBOUNCE_CORE *bounce) noexcept
     : bounce_(bounce) {
   }
 
@@ -307,6 +273,15 @@ public:
    */
   inline TBOUNCE_CORE *get_core() const noexcept {
     return bounce_;
+  }
+
+  /**
+   * @brief Publish this bounce reference as the current thread/task-local core.
+   * @remarks Passing an unbound reference clears the current attachment. This
+   * is equivalent to calling `bounce_set_core(get_core())`.
+   */
+  inline void set_default() const noexcept {
+    ::bounce_set_core(bounce_);
   }
 
   /**
@@ -361,6 +336,8 @@ public:
    * @brief Park current thread and run continuation repeatedly.
    * @return True when succeeded continuation pumps.
    * @remarks The thread will block inside. Release when `shutdown()` called.
+   * Call `set_default()` first when callbacks or coroutine helpers on this
+   * thread need `get_current()`.
    */
   inline bool park() noexcept {
     return (bounce_ != nullptr) ?
@@ -373,7 +350,8 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park(unsigned int max_inline_depth) noexcept {
     return (bounce_ != nullptr) ?
@@ -385,7 +363,9 @@ public:
    * @brief Pump current thread once without waiting for new completion work.
    * @return True when succeeded continuation pumps.
    * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work.
+   * dispatchable and then returns without blocking for future work. Call
+   * `set_default()` first when callbacks or coroutine helpers on this thread
+   * need `get_current()`.
    */
   inline bool park_once() noexcept {
     return (bounce_ != nullptr) ?
@@ -398,7 +378,8 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park_once(unsigned int max_inline_depth) noexcept {
     return (bounce_ != nullptr) ?
@@ -408,10 +389,12 @@ public:
 
   /**
    * @brief Shutdown parking threads.
+   * @param wait_for_idle When true, keep parking until already-pending wait
+   * operations settle. Defaults to true.
    */
-  inline void shutdown() noexcept {
+  inline void shutdown(bool wait_for_idle = true) noexcept {
     if (bounce_ != nullptr) {
-      ::bounce_shutdown(bounce_);
+      ::bounce_shutdown(bounce_, wait_for_idle);
     }
   }
 };
@@ -429,8 +412,6 @@ private:
   bounce_base& operator=(bounce_base&&) = delete;
 
 public:
-  using current_attachment = core_attachment_base<TBOUNCE_CORE>;
-
   /**
    * @brief Get the underlying bounce core storage.
    * @return Backend bounce core pointer.
@@ -440,20 +421,30 @@ public:
   }
 
   /**
+   * @brief Publish this bounce as the current thread/task-local core.
+   * @remarks This is equivalent to calling `bounce_set_core(get_core())`.
+   */
+  inline void set_default() noexcept {
+    ::bounce_set_core(&bounce_);
+  }
+
+  /**
    * @brief Get the current thread/task-local or fallback bounce core pointer.
-   * @return Backend bounce core pointer, or `NULL` when neither an attachment
-   * nor a fallback core is available.
+   * @return Backend bounce core pointer, or `NULL` when neither a current
+   * attachment nor a fallback core is available.
    */
   static inline TBOUNCE_CORE *get_current_core() noexcept {
     return static_cast<TBOUNCE_CORE *>(::bounce_get_core());
   }
 
   /**
-   * @brief Attach this bounce core to the current thread/task-local slot.
-   * @return RAII attachment that restores the previous core when destroyed.
+   * @brief Get the current thread/task-local or fallback bounce as a
+   * non-owning reference.
+   * @return Non-owning reference to the current or fallback bounce core. The
+   * returned reference is unbound when neither is available.
    */
-  inline current_attachment attach_current() noexcept {
-    return current_attachment(&bounce_);
+  static inline bounce_base_ref<TBOUNCE_CORE> get_current() noexcept {
+    return bounce_base_ref<TBOUNCE_CORE>(get_current_core());
   }
 
   template<typename COMPLETION_TYPE>
@@ -474,6 +465,11 @@ public:
   }
 
 protected:
+  template<typename INIT_FN>
+  explicit inline bounce_base(INIT_FN&& init) noexcept {
+    init(&bounce_);
+  }
+
   inline bounce_base() noexcept {
     ::bounce_init(&bounce_);
   }
@@ -529,6 +525,8 @@ public:
    * @brief Park current thread and run continuation repeatedly.
    * @return True when succeeded continuation pumps.
    * @remarks The thread will block inside. Release when `shutdown()` called.
+   * Call `set_default()` first when callbacks or coroutine helpers on this
+   * thread need `get_current()`.
    */
   inline bool park() noexcept {
     return ::bounce_park(&bounce_, 0u);
@@ -539,7 +537,8 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park(unsigned int max_inline_depth) noexcept {
     return ::bounce_park(&bounce_, max_inline_depth);
@@ -549,7 +548,9 @@ public:
    * @brief Pump current thread once without waiting for new completion work.
    * @return True when succeeded continuation pumps.
    * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work.
+   * dispatchable and then returns without blocking for future work. Call
+   * `set_default()` first when callbacks or coroutine helpers on this thread
+   * need `get_current()`.
    */
   inline bool park_once() noexcept {
     return ::bounce_park_once(&bounce_, 0u);
@@ -560,7 +561,8 @@ public:
    * @param max_inline_depth Maximum number of inline nested completion executions.
    * @return True when succeeded continuation pumps.
    * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior.
+   * traditional ready-queue-only behavior. Call `set_default()` first when
+   * callbacks or coroutine helpers on this thread need `get_current()`.
    */
   inline bool park_once(unsigned int max_inline_depth) noexcept {
     return ::bounce_park_once(&bounce_, max_inline_depth);
@@ -568,9 +570,11 @@ public:
 
   /**
    * @brief Shutdown parking threads.
+   * @param wait_for_idle When true, keep parking until already-pending wait
+   * operations settle. Defaults to true.
    */
-  inline void shutdown() noexcept {
-    ::bounce_shutdown(&bounce_);
+  inline void shutdown(bool wait_for_idle = true) noexcept {
+    ::bounce_shutdown(&bounce_, wait_for_idle);
   }
 };
 
@@ -739,12 +743,12 @@ public:
 
 #include "timer.h"
 
-#if defined(BOUNCE_POSIX)
-#include "posix.h"
-#endif
-
 #if defined(BOUNCE_GENERIC)
 #include "generic.h"
+#endif
+
+#if defined(BOUNCE_POSIX)
+#include "posix.h"
 #endif
 
 #if defined(BOUNCE_POSIX_GLIB)

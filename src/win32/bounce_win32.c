@@ -387,6 +387,38 @@ static inline void bounce_win32_queue_ready_locked(
   bounce_queue_enqueue(&r->ready_queue, &item->ready_or_free_link);
 }
 
+static inline bool bounce_win32_has_pending_waits_locked(BOUNCE_CORE *r) {
+  BOUNCE_DYNAMIC_BLOCK *block;
+
+  for (size_t index = 0u; index < BOUNCE_MAX_STATIC_COMPLETION_ITEMS; index++) {
+    if (r->static_completion_items[index].state ==
+        BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+      return true;
+    }
+  }
+
+  block = r->dynamic_completion_blocks.head;
+  while (block != NULL) {
+    __BOUNCE_COMPLETION_ITEM *items =
+      (__BOUNCE_COMPLETION_ITEM *)bounce_dynamic_block_const_items(block);
+
+    for (size_t index = 0u; index < block->item_count; index++) {
+      if (items[index].state == BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+        return true;
+      }
+    }
+    block = block->next;
+  }
+  return false;
+}
+
+static inline bool bounce_win32_should_exit_locked(BOUNCE_CORE *r) {
+  return (r->shutting_down != 0) &&
+         (r->ready_queue.head == NULL) &&
+         ((r->shutdown_wait_for_idle == 0) ||
+          !bounce_win32_has_pending_waits_locked(r));
+}
+
 static __BOUNCE_WIN32_START_RESULT bounce_win32_activate_wait_item(
   BOUNCE_CORE *r,
   __BOUNCE_COMPLETION_ITEM *item,
@@ -702,7 +734,16 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
   wait_handles[PARK_WAIT_INDEX_WAKE] = r->wake_semaphore;
 
   for (;;) {
+    bool should_return;
+
     while (bounce_win32_dispatch_next_ready(r, max_inline_depth)) {
+    }
+
+    EnterCriticalSection(&r->lock);
+    should_return = bounce_win32_should_exit_locked(r);
+    LeaveCriticalSection(&r->lock);
+    if (should_return) {
+      return true;
     }
 
     pump_result = bounce_win32_pump_messages();
@@ -713,10 +754,6 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
       continue;
     }
 
-    if (WaitForSingleObject(r->shutdown_event, 0u) == WAIT_OBJECT_0) {
-      return true;
-    }
-
     wait_result = MsgWaitForMultipleObjects(
       PARK_WAIT_INDEX_COUNT,
       wait_handles,
@@ -725,7 +762,6 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
       QS_ALLINPUT);
     switch (wait_result) {
       case WAIT_OBJECT_0 + PARK_WAIT_INDEX_SHUTDOWN:
-        return true;
       case WAIT_OBJECT_0 + PARK_WAIT_INDEX_WAKE:
       case WAIT_OBJECT_0 + PARK_WAIT_INDEX_COUNT:
         break;
@@ -868,14 +904,29 @@ void bounce_await_win32_handle(
  * @brief Shutdown parking threads.
  * @param r Initialized BOUNCE_CORE.
  */
-void bounce_shutdown(BOUNCE_CORE *r) {
+void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle) {
+  bool signal_shutdown_event = false;
+
   if (r == NULL) {
     return;
   }
 
-  (void)InterlockedExchange(&r->shutting_down, 1);
-  if (r->shutdown_event != NULL) {
+  EnterCriticalSection(&r->lock);
+  r->shutting_down = 1;
+  if (wait_for_idle) {
+    r->shutdown_wait_for_idle = 1;
+  } else {
+    r->shutdown_wait_for_idle = 0;
+    signal_shutdown_event = true;
+  }
+  LeaveCriticalSection(&r->lock);
+
+  if (signal_shutdown_event &&
+      (r->shutdown_event != NULL)) {
     (void)SetEvent(r->shutdown_event);
+  }
+  if (wait_for_idle) {
+    bounce_win32_release_wakeups(r, BOUNCE_MAX_PARKERS);
   }
 }
 
@@ -893,7 +944,7 @@ void bounce_deinit(BOUNCE_CORE *r) {
     return;
   }
 
-  bounce_shutdown(r);
+  bounce_shutdown(r, false);
   bounce_queue_init(&abort_queue);
 
   for (waiter_index = 0u; waiter_index < BOUNCE_MAX_WIN32_WAITERS; waiter_index++) {

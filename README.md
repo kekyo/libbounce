@@ -79,17 +79,17 @@ make -f Makefile.posix_glib all
 make -f Makefile.freertos test
 
 # Win32 cross build
-make -f Makefile.win32 all CC=x86_64-w64-mingw32-gcc-win32
+make -f Makefile.win32 all
 ```
 
 If you want to run the full test set including the C / C++ layers, use:
 
 ```bash
 # Full C / C++ test suite
-sh build.sh
+./build.sh
 
 # Full C++20 coroutine test suite
-sh build_cxx20.sh
+./build_cxx20.sh
 ```
 
 For embedding, add the public headers under `include/libbounce/` and the
@@ -99,8 +99,10 @@ The required source file combinations can be taken directly from each
 
 Note that additional dependencies vary by backend.
 
-- POSIX uses `pthread` and `poll()`.
-- POSIX+GLib requires `glib-2.0`, `gobject-2.0`, and `gio-2.0`.
+- POSIX uses `pthread` and `poll()` for fd waits. Linux builds also require
+  `liburing` for `io_uring` waits.
+- POSIX+GLib requires `glib-2.0`, `gobject-2.0`, and `gio-2.0`. Linux builds
+  also require `liburing` for `io_uring` waits.
 - FreeRTOS automatically fetches `FreeRTOS-Kernel` when you run
   `Makefile.freertos`.
 - Running Win32 tests requires MinGW-w64 Win32-thread compilers and Wine.
@@ -115,6 +117,7 @@ $ sudo dpkg --add-architecture i386
 $ echo "deb [trusted=yes] https://dl.espressif.com/dl/eim/apt/ stable main" | sudo tee /etc/apt/sources.list.d/espressif.list
 $ sudo apt update
 $ sudo apt install build-essential pkg-config libglib2.0-dev \
+    liburing-dev \
     nodejs \
     gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 \
     gcc-mingw-w64-i686-win32 g++-mingw-w64-i686-win32 \
@@ -231,7 +234,7 @@ int main(void) {
   /* ------------------------------------- */
 
   /* Start shutting down libbounce */
-  bounce_shutdown(&bounce);
+  bounce_shutdown(&bounce, false);
 
   /* ... wait for the parker thread to exit ... */
 
@@ -246,7 +249,7 @@ The basic lifecycle is as follows.
 1. Initialize the core with `bounce_init()`.
 2. Start `bounce_park()` on one or more threads or tasks.
 3. Register `bounce_post()` or await APIs from other contexts.
-4. Call `bounce_shutdown()` when stopping so parkers can exit.
+4. Call `bounce_shutdown(..., false)` when stopping so parkers can exit.
 5. Call `bounce_deinit()` only after confirming that all parkers have finished.
 
 `bounce_park()` keeps waiting internally until a shutdown request arrives.
@@ -279,8 +282,10 @@ you need to call `bounce_set_core()` in advance.
 
 This matters in particular when you want to register the next async operation in
 the middle of a callback chain, or when C++ code wants to use the current core
-to resolve `libbounce::bounce::current()` or coroutine resumption targets.
+to resolve `libbounce::bounce::get_current()` or coroutine resumption targets.
 Conversely, it is not required if you always pass `BOUNCE_CORE*` explicitly.
+The C++ API provides `bounce.set_default()`, which is a thin wrapper around
+`bounce_set_core(bounce.get_core())` for the current thread or task.
 
 The following example uses `bounce_get_core()` inside a continuation to chain
 the next continuation.
@@ -333,6 +338,8 @@ If you want to stop an individual wait request before it completes, use
 `BOUNCE_CANCELLATION` instead of `bounce_shutdown()`.
 `bounce_shutdown()` requests that all parkers stop and is the operation for
 winding down the entire library.
+Pass `wait_for_idle=true` when you want parked threads or tasks to keep
+draining already-pending wait operations before they leave.
 Cancellation is for cases where you want to withdraw only one wait.
 
 Use it as follows.
@@ -573,29 +580,28 @@ bounce.shutdown();
 parker.join();
 ```
 
-Also, `attach_current()` temporarily publishes the current bounce into the
-thread's TLS.
-That makes `libbounce::bounce::current()` return a `bounce_ref`.
+Also, when you want `libbounce::bounce::get_current()` to resolve to a
+backend-specific non-owning `bounce_ref` on the current thread or task, call
+`set_default()` explicitly before `park()` or `park_once()`.
 
 ```cpp
 /* Own the bounce core */
 libbounce::bounce bounce;
-/* Other helper types can also be kept as ordinary automatic variables */
-libbounce::timer timer;
-
-{
-  /* Temporarily attach bounce to the current thread */
-  auto attachment = bounce.attach_current();
+/* Publish it to the current thread or task */
+bounce.set_default();
+/* Queue a continuation that will run on the parker */
+(void)bounce.post([] {
   /* Read the current bounce reference from TLS */
-  auto current = libbounce::bounce::current();
+  auto current = libbounce::bounce::get_current();
 
-  /* If the current bounce is available, register a continuation through it */
-  if (current.has_value()) {
-    (void)current->post([] {
-      /* Continuation body through bounce_ref obtained from current() */
+  /* If the current bounce is available, register another continuation through it */
+  if (current) {
+    (void)current.post([] {
+      /* Continuation body through bounce_ref obtained from get_current() */
     });
   }
-}
+});
+(void)bounce.park_once();
 ```
 
 This is useful inside library internals or callback chains when you do not want
@@ -616,7 +622,7 @@ backend.
 |`bounce_post()`|Push a continuation onto the ready queue so it runs on a parker|
 |`bounce_park()`|Park the current thread or task as a parker|
 |`bounce_park_once()`|Run only the continuations that are dispatchable right now, once, then return|
-|`bounce_shutdown()`|Request all parkers to stop|
+|`bounce_shutdown()`|Request all parkers to stop, optionally after pending waits settle|
 |`bounce_set_core()` / `bounce_get_core()` / `bounce_set_fallback_core()`|Publish and read the core for the current thread or task, with an optional process-wide fallback|
 |`bounce_cancellation_*()`|Initialize, issue, and destroy a cancellation source|
 |`bounce_register_canceled()` / `bounce_unregister_canceled()`|Register and unregister a continuation that runs on cancellation|
@@ -674,8 +680,8 @@ Each backend adds its own wait targets and helper types.
 |Platform|Header|Additional API|Purpose|
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|None|Single-parker generic core with busy-spin parking and timer polling, without backend-specific wait targets|
-|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`|Wait for fd readiness based on `poll()`. A lightweight one-shot condition is also available|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`|Wait for fd readiness integrated with `GMainContext` / `GSource`|
+|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|Wait for fd readiness based on `poll()`. A lightweight one-shot condition is also available. Linux can also await one-shot `io_uring` submissions|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. Linux can also forward `io_uring` completions back into the same parked GLib context|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|Notify a condition from both task context and ISR context|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|Wait for fd readiness only when `BOUNCE_FREERTOS_ENABLE_FD_AWAIT` is enabled|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|Wait on `HANDLE`s such as events and waitable timers|
@@ -691,10 +697,13 @@ The intended usage for each backend is as follows.
   Suitable when you want to run `bounce_park()` on a dedicated thread while
   waiting for fd readability or writability.
   fd waiting uses `poll(2)` events such as `POLLIN` and `POLLOUT`.
+  On Linux, the same backend also accepts one-shot `io_uring` awaits.
 - POSIX+GLib:
   Intended for applications that already use the GLib main loop.
   The ready queue is processed as a source on `GMainContext`, so it integrates
   naturally with the GLib model.
+  On Linux, `io_uring` completions are also bridged back into that same
+  `GMainContext`.
 - FreeRTOS:
   Suitable when running a task as a parker and handling lightweight condition
   notifications or timers.
@@ -720,13 +729,13 @@ The common types are as follows.
 
 |Type / Method|Role|
 |:----|:----|
-|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `park()`, `park_once()`, `shutdown()`, and `attach_current()`|
-|`libbounce::bounce::current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `std::optional<bounce_ref>`|
-|`libbounce::bounce_ref`|Non-owning reference. Lets you call `post()`, `park()`, `shutdown()`, and similar operations on a core managed elsewhere|
+|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `set_default()`, `park()`, `park_once()`, and `shutdown()`|
+|`libbounce::bounce::get_current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `bounce_ref`|
+|`libbounce::bounce_base_ref`|Common non-owning reference. Lets you call `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()`, and similar operations on a core managed elsewhere|
+|`libbounce::bounce_ref`|Backend-specific non-owning reference. Extends `bounce_base_ref` with backend-local helper methods where available|
 |`libbounce::timer`|RAII wrapper for `BOUNCE_TIMER`. Registers timer waits with `wait(bounce, duration_msec, ...)`|
 |`libbounce::cancellation`|RAII wrapper for `BOUNCE_CANCELLATION`. Issues cancellation with `cancel(bounce)`|
 |`libbounce::cancellation_registration`|RAII wrapper for cancellation continuations. Exposes `register_canceled(...)` and `unregister()`|
-|`attach_current()`|Attaches the core to the current thread or task via TLS for the lifetime of the scope, then restores the previous state when destroyed|
 
 The backend-specific differences are mostly in the arguments of `wait(...)`,
 `raise(...)`, and `await(...)`.
@@ -734,8 +743,8 @@ The backend-specific differences are mostly in the arguments of `wait(...)`,
 |Backend|Main additional types / methods|
 |:----|:----|
 |Generic|No additional backend-local wait methods. Use `post()` and `libbounce::timer`|
-|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`|
+|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`|
@@ -776,6 +785,136 @@ into `co_await` without a large rewrite.
 Also, `libbounce::promise<T>` uses lazy start rather than eager start.
 A created coroutine does not begin running until you call `start()`, and
 destroying a started but unfinished promise is a programming error.
+
+---
+
+## Platform Notes
+
+### Linux `io_uring`
+
+`io_uring` support is available only on Linux builds of the POSIX and
+POSIX+GLib backends.
+libbounce keeps the integration intentionally small: one await corresponds to
+one caller-owned `BOUNCE_POSIX_IO_URING_OP`, your prepare callback fills one
+SQE, and the completion still resumes on the parked thread or the parked GLib
+context.
+
+In the C API, initialize the operation with `bounce_posix_io_uring_op_init()`,
+register it with `bounce_await_posix_io_uring_op()` or
+`bounce_await_posix_glib_io_uring_op()`, and read the terminal CQE data through
+`bounce_posix_io_uring_op_result()` and
+`bounce_posix_io_uring_op_cqe_flags()`.
+The C++ headers provide the thin RAII wrapper
+`libbounce::io_uring_operation` for the same pattern.
+Operations are one-shot, so create a fresh operation per submission or wait
+until the previous one has settled before reusing its storage.
+When you use the GLib backend, include `libbounce/posix_glib.h` and call the
+same await pattern on that backend's `libbounce::bounce`.
+
+```cpp
+#include <liburing.h>
+#include <sys/types.h>
+#include <libbounce/promise.h>
+#include <libbounce/posix.h>
+
+struct read_request {
+  int fd;
+  void *buffer;
+  unsigned int length;
+  off_t offset;
+};
+
+static void prepare_read(struct io_uring_sqe *sqe, void *state) noexcept {
+  auto *request = static_cast<read_request *>(state);
+
+  io_uring_prep_read(
+    sqe,
+    request->fd,
+    request->buffer,
+    request->length,
+    request->offset);
+}
+
+static libbounce::promise<void> read_once(
+  libbounce::bounce &bounce,
+  int fd,
+  void *buffer,
+  unsigned int length) {
+  read_request request { fd, buffer, length, 0 };
+  libbounce::io_uring_operation operation(&prepare_read, &request);
+  const libbounce::await_result result =
+    co_await bounce.await(*operation.get_operation(), nullptr);
+
+  if (result.completed() && (operation.result() >= 0)) {
+    /* operation.result() is the CQE res value */
+  }
+}
+```
+
+Cancellation works the same way as other waits: pass
+`BOUNCE_CANCELLATION*` / `libbounce::cancellation`, and a canceled operation
+resolves as `BOUNCE_COMPLETION_CANCELED` / `canceled()`.
+For an end-to-end sample that integrates `io_uring`, coroutines, and GTK3,
+see [`examples/posix-io_uring-glib/`](./examples/posix-io_uring-glib/).
+
+### POSIX+GLib
+
+When you use libbounce together with GTK or another framework that already
+drives a GLib main loop, initialize the POSIX+GLib backend with that existing
+`GMainContext` and then call `bounce_park()` instead of starting a separate
+`gtk_main()` loop.
+
+Use `bounce_init_with_main_context(&bounce, g_main_context_default())` for the
+C API, or `libbounce::bounce bounce(g_main_context_default())` for the C++
+helper.
+Passing `NULL` still keeps the old behavior and creates a private
+`GMainContext`.
+
+The important point is that `bounce_park()` becomes the single blocking loop on
+the GUI thread.
+If you call `gtk_main()` separately, GTK and libbounce end up driving different
+dispatch loops.
+
+The following simplified GTK3 `main()` shows the intended shape:
+
+```cpp
+#include <gtk/gtk.h>
+#include <libbounce/posix_glib.h>
+
+static void on_destroy(GtkWidget *widget, gpointer user_data) {
+  auto *bounce = static_cast<libbounce::bounce *>(user_data);
+
+  (void)widget;
+  bounce->shutdown();
+}
+
+int main(int argc, char **argv) {
+  gtk_init(&argc, &argv);
+
+  libbounce::bounce bounce(g_main_context_default());
+  GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+
+  gtk_window_set_title(GTK_WINDOW(window), "example");
+  g_signal_connect(window, "destroy", G_CALLBACK(on_destroy), &bounce);
+  gtk_widget_show_all(window);
+
+  (void)bounce.park();
+  return 0;
+}
+```
+
+The equivalent C initialization is:
+
+```c
+gtk_init(&argc, &argv);
+BOUNCE_CORE bounce;
+bounce_init_with_main_context(&bounce, g_main_context_default());
+```
+
+If callbacks or helpers need `bounce_get_core()` in the C API, call
+`bounce_set_core()` before entering `bounce_park()`. In the C++ API, call
+`bounce.set_default()` before `bounce.park()` or `bounce.park_once()` when the
+current thread or task needs `get_current()`.
 
 ---
 

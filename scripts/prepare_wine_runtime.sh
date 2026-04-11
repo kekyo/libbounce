@@ -6,6 +6,7 @@ wine_prefix=$1
 runtime_name=$2
 test_binary=$3
 shared_library=$4
+shift 4
 
 runtime_dir="$wine_prefix/drive_c/$runtime_name"
 
@@ -51,3 +52,6 @@ mkdir -p "$runtime_dir"
 
 stage_runtime_file "$test_binary"
 stage_runtime_file "$shared_library"
+for runtime_file in "$@"; do
+	stage_runtime_file "$runtime_file"
+done

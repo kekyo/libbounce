@@ -34,7 +34,7 @@ typedef TEST_POSIX_FREERTOS_RUNTIME_COMPLETION_CONTEXT TEST_COMPLETION_CONTEXT;
 
 extern void test_cpp_wrapper_condition_raise_from_isr_runs(void);
 extern void test_cpp_wrapper_timer_await_runs(void);
-extern void test_cpp_wrapper_attach_current_timeout_await_runs(void);
+extern void test_cpp_wrapper_set_default_timeout_await_runs(void);
 
 static StaticTask_t g_main_task_tcb;
 static StackType_t g_main_task_stack[ TEST_MAIN_TASK_STACK_DEPTH ];
@@ -186,7 +186,7 @@ static void test_single_condition_await_runs_from_isr(void) {
 static void test_cpp_runtime_reclaims_stack_backed_tasks_before_reuse(void) {
   for (unsigned int iteration = 0u; iteration < 32u; iteration++) {
     test_cpp_wrapper_timer_await_runs();
-    test_cpp_wrapper_attach_current_timeout_await_runs();
+    test_cpp_wrapper_set_default_timeout_await_runs();
   }
 }
 

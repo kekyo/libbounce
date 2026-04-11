@@ -1,15 +1,22 @@
 CC ?= cc
 PKG_CONFIG ?= pkg-config
+XVFB_RUN ?= xvfb-run
 BUILD_DIR ?= build/posix_glib
 THREAD_FLAGS := -pthread
 GLIB_CFLAGS := $(shell $(PKG_CONFIG) --cflags glib-2.0 gobject-2.0 gio-2.0)
 GLIB_LIBS := $(shell $(PKG_CONFIG) --libs glib-2.0 gobject-2.0 gio-2.0)
+GTK3_CFLAGS := $(shell $(PKG_CONFIG) --cflags gtk+-3.0)
+GTK3_LIBS := $(shell $(PKG_CONFIG) --libs gtk+-3.0)
+LIBURING_CFLAGS := $(shell $(PKG_CONFIG) --cflags liburing 2>/dev/null)
+LIBURING_LIBS := $(shell $(PKG_CONFIG) --libs liburing 2>/dev/null)
 SOURCES := \
 	src/posix-glib/bounce_tls_posix_glib.c \
 	src/posix-glib/bounce_posix_glib.c \
 	src/posix-glib/bounce_posix_glib_timer.c
 TEST_SOURCES := \
 	tests/posix-glib/test_posix_glib.c \
+	tests/posix-glib/test_posix_glib_gtk3_example.cpp \
+	tests/posix-glib/test_posix_io_uring_glib_gtk3_example.cpp \
 	tests/shared/test_timer_header_shared.c \
 	tests/shared/test_cpp_runtime_host.cpp \
 	tests/shared/test_cpp_shared.cpp \
@@ -17,20 +24,61 @@ TEST_SOURCES := \
 	tests/shared/test_cpp_promise_shared.cpp \
 	tests/test_harness.c
 TEST_HEADERS := tests/test_harness.h tests/shared/test_cpp_runtime.h
+EXTRA_COMMON_HEADERS := \
+	examples/posix-glib/example_app.h \
+	examples/posix-io_uring-glib/example_app.h
+EXTRA_TEST_LINK_OBJECTS = \
+	$(OBJ_DIR)/examples/posix-glib/example_app.testlink.o \
+	$(OBJ_DIR)/examples/posix-io_uring-glib/example_app.testlink.o
 TESTS = $(TEST_DIR)/test_posix_glib$(EXE_EXT)
 STATIC_LIB := $(BUILD_DIR)/libbounce-glib.a
 SHARED_LIB = $(BUILD_DIR)/libbounce-glib.so
 SHARED_OBJECTS = $(PIC_OBJECTS)
 PIC_CFLAGS := -fPIC
-PLATFORM_CPPFLAGS := -DBOUNCE_POSIX_GLIB=1 $(GLIB_CFLAGS)
-PLATFORM_LDLIBS := $(GLIB_LIBS)
-SHARED_LDLIBS := $(GLIB_LIBS)
+PLATFORM_CPPFLAGS := -DBOUNCE_POSIX_GLIB=1 $(GLIB_CFLAGS) $(LIBURING_CFLAGS)
+PLATFORM_LDLIBS := $(GTK3_LIBS) $(GLIB_LIBS) $(LIBURING_LIBS)
+SHARED_LDLIBS := $(GLIB_LIBS) $(LIBURING_LIBS)
+POSIX_GLIB_EXAMPLE_EXE := $(BUILD_DIR)/examples/posix-glib/libbounce_posix_glib_gtk3_example
+POSIX_GLIB_EXAMPLE_OBJECTS = \
+	$(OBJ_DIR)/examples/posix-glib/example_app.example.o \
+	$(OBJ_DIR)/examples/posix-glib/main.example.o
+POSIX_IO_URING_GLIB_EXAMPLE_EXE := $(BUILD_DIR)/examples/posix-io_uring-glib/libbounce_posix_io_uring_glib_gtk3_example
+POSIX_IO_URING_GLIB_EXAMPLE_OBJECTS = \
+	$(OBJ_DIR)/examples/posix-io_uring-glib/example_app.example.o \
+	$(OBJ_DIR)/examples/posix-io_uring-glib/main.example.o
+POSIX_GLIB_EXAMPLE_CXXFLAGS := $(CXXFLAGS) -std=c++20
+POSIX_GLIB_EXAMPLE_CPPFLAGS := $(PLATFORM_CPPFLAGS) $(GTK3_CFLAGS)
 
 include Makefile.common
 
-.PHONY: test clean
+.PHONY: test clean example-posix-glib
 
-test: $(STATIC_LIB) $(SHARED_LIB) $(TESTS)
-	./$(TESTS)
+example-posix-glib: $(STATIC_LIB) $(POSIX_GLIB_EXAMPLE_EXE) $(POSIX_IO_URING_GLIB_EXAMPLE_EXE)
+
+test: $(STATIC_LIB) $(SHARED_LIB) $(TESTS) $(POSIX_GLIB_EXAMPLE_EXE) $(POSIX_IO_URING_GLIB_EXAMPLE_EXE)
+	if [ -n "$$DISPLAY" ]; then \
+		./$(TESTS); \
+	elif command -v "$(XVFB_RUN)" >/dev/null 2>&1; then \
+		"$(XVFB_RUN)" -a ./$(TESTS); \
+	else \
+		printf '%s\n' "DISPLAY is not set and $(XVFB_RUN) was not found." >&2; \
+		exit 1; \
+	fi
+
+$(POSIX_GLIB_EXAMPLE_EXE): $(POSIX_GLIB_EXAMPLE_OBJECTS) $(STATIC_LIB) $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(BUILD_DIR)
+	mkdir -p $(dir $@)
+	$(CXX) $(THREAD_FLAGS) $(LDFLAGS) -o $@ $(POSIX_GLIB_EXAMPLE_OBJECTS) $(STATIC_LIB) $(LDLIBS) $(GTK3_LIBS) $(LIBURING_LIBS)
+
+$(POSIX_IO_URING_GLIB_EXAMPLE_EXE): $(POSIX_IO_URING_GLIB_EXAMPLE_OBJECTS) $(STATIC_LIB) $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(BUILD_DIR)
+	mkdir -p $(dir $@)
+	$(CXX) $(THREAD_FLAGS) $(LDFLAGS) -o $@ $(POSIX_IO_URING_GLIB_EXAMPLE_OBJECTS) $(STATIC_LIB) $(LDLIBS) $(GTK3_LIBS) $(LIBURING_LIBS)
+
+$(OBJ_DIR)/%.example.o: %.cpp $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(OBJ_DIR)
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(POSIX_GLIB_EXAMPLE_CPPFLAGS) $(POSIX_GLIB_EXAMPLE_CXXFLAGS) $(PLATFORM_CXXFLAGS) $(THREAD_FLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%.testlink.o: %.cpp $(PUBLIC_HEADERS) $(COMMON_HEADERS) | $(OBJ_DIR)
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(POSIX_GLIB_EXAMPLE_CPPFLAGS) $(POSIX_GLIB_EXAMPLE_CXXFLAGS) $(PLATFORM_CXXFLAGS) $(THREAD_FLAGS) -c $< -o $@
 
 clean: clean-common

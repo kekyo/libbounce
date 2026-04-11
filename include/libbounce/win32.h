@@ -114,6 +114,7 @@ struct BOUNCE_CORE {
   HANDLE shutdown_event;
   HANDLE wake_semaphore;
   volatile LONG shutting_down;
+  volatile LONG shutdown_wait_for_idle;
   BOUNCE_QUEUE ready_queue;
   BOUNCE_STACK free_items;
   BOUNCE_DYNAMIC_BLOCK_LIST dynamic_completion_blocks;
@@ -189,15 +190,24 @@ extern void bounce_await_win32_handle(BOUNCE_CORE *r,
 #ifdef __cplusplus
 namespace libbounce {
 
-class bounce_ref : public bounce_ref_base<BOUNCE_CORE> {
+class bounce_ref : public bounce_base_ref<BOUNCE_CORE> {
 private:
   friend class bounce;
 
   explicit inline bounce_ref(BOUNCE_CORE *core) noexcept
-    : bounce_ref_base(core) {
+    : bounce_base_ref(core) {
   }
 
 public:
+  /**
+   * @brief Build a backend-specific bounce reference from a common
+   * non-owning bounce reference.
+   * @param reference Common bounce reference.
+   */
+  explicit inline bounce_ref(const bounce_base_ref<BOUNCE_CORE>& reference) noexcept
+    : bounce_base_ref(reference.get_core()) {
+  }
+
   /**
    * @brief Await a Win32 handle and continue completion on a parked thread.
    * @param handle Win32 kernel object handle.
@@ -283,14 +293,26 @@ public:
   ~bounce() = default;
 
   /**
-   * @brief Get a non-owning bounce reference from the current attachment or fallback core.
+   * @brief Get the current thread/task-local or fallback bounce as a
+   * backend-specific non-owning reference.
+   * @return Backend-specific bounce reference. The returned reference is
+   * unbound when neither a current attachment nor a fallback core is
+   * available.
+   */
+  static inline bounce_ref get_current() noexcept {
+    return bounce_ref(bounce_base<BOUNCE_CORE>::get_current());
+  }
+
+  /**
+   * @brief Get a non-owning backend-specific bounce reference from the current
+   * attachment or fallback core.
    * @return Bounce reference when present.
    */
   static inline std::optional<bounce_ref> current() noexcept {
-    BOUNCE_CORE *core = bounce::get_current_core();
+    bounce_ref current = bounce::get_current();
 
-    return (core != nullptr) ?
-             std::optional<bounce_ref>(bounce_ref(core)) :
+    return current ?
+             std::optional<bounce_ref>(current) :
              std::nullopt;
   }
 

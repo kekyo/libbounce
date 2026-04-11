@@ -57,6 +57,17 @@ fail() {
 	exit 1
 }
 
+assert_file() {
+	[ -f "$1" ] || fail "Missing expected file: $1"
+}
+
+assert_contains() {
+	target_path=$1
+	expected_text=$2
+
+	grep -F "$expected_text" "$target_path" >/dev/null 2>&1 || fail "Missing expected text in $target_path: $expected_text"
+}
+
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
 }
@@ -173,6 +184,88 @@ $WIN32_MATRIX
 EOF
 
 	printf '%s\n' "$build_count"
+}
+
+count_matching_files() {
+	target_dir=$1
+	pattern=$2
+
+	if [ ! -d "$target_dir" ]; then
+		printf '%s\n' '0'
+		return 0
+	fi
+
+	find "$target_dir" -type f -name "$pattern" | wc -l | tr -d ' '
+}
+
+expected_elf_class() {
+	case $1 in
+		x86_64 | arm64 | riscv64)
+			printf '%s\n' 'ELF64'
+			;;
+		i686 | armv7l)
+			printf '%s\n' 'ELF32'
+			;;
+		*)
+			fail "Unsupported ELF class lookup: $1"
+			;;
+	esac
+}
+
+expected_elf_machine() {
+	case $1 in
+		x86_64)
+			printf '%s\n' 'Advanced Micro Devices X86-64'
+			;;
+		i686)
+			printf '%s\n' 'Intel 80386'
+			;;
+		arm64)
+			printf '%s\n' 'AArch64'
+			;;
+		armv7l)
+			printf '%s\n' 'ARM'
+			;;
+		riscv64)
+			printf '%s\n' 'RISC-V'
+			;;
+		*)
+			fail "Unsupported ELF machine lookup: $1"
+			;;
+	esac
+}
+
+deb_arch_name() {
+	case $1 in
+		x86_64)
+			printf '%s\n' 'amd64'
+			;;
+		i686)
+			printf '%s\n' 'i386'
+			;;
+		arm64)
+			printf '%s\n' 'arm64'
+			;;
+		armv7l)
+			printf '%s\n' 'armhf'
+			;;
+		riscv64)
+			printf '%s\n' 'riscv64'
+			;;
+		*)
+			fail "Unsupported Debian architecture lookup: $1"
+			;;
+	esac
+}
+
+deb_artifact_path() {
+	package_name=$1
+	distro=$2
+	release=$3
+	arch=$4
+	deb_arch=$(deb_arch_name "$arch")
+
+	printf '%s\n' "$ARTIFACT_ROOT/deb/${package_name}-${VERSION}-${distro}-${release}-${deb_arch}.deb"
 }
 
 choose_container_engine() {
@@ -400,6 +493,194 @@ idf_component_register(
 EOF
 }
 
+validate_base_deb_package() {
+	package_path=$1
+	expected_arch=$2
+	expected_deb_arch=$(deb_arch_name "$expected_arch")
+	tmp_dir=$(mktemp -d)
+
+	assert_file "$package_path"
+	[ "$(dpkg-deb -f "$package_path" Architecture)" = "$expected_deb_arch" ] || fail "Unexpected Architecture field in $package_path"
+	[ "$(dpkg-deb -f "$package_path" Version)" = "$VERSION" ] || fail "Unexpected Version field in $package_path"
+
+	dpkg-deb -x "$package_path" "$tmp_dir"
+
+	for header_path in "$PROJECT_ROOT"/include/libbounce/*.h; do
+		header_name=$(basename "$header_path")
+		assert_file "$tmp_dir/usr/include/libbounce/$header_name"
+	done
+	assert_file "$tmp_dir/usr/share/doc/$BASE_PACKAGE_NAME/LICENSE"
+	assert_file "$tmp_dir/usr/share/doc/$BASE_PACKAGE_NAME/README.md"
+	assert_file "$tmp_dir/usr/share/doc/$BASE_PACKAGE_NAME/README_ja.md"
+
+	lib_file=$(find "$tmp_dir/usr/lib" -type f -name 'libbounce.so' | head -n 1)
+	static_lib=$(find "$tmp_dir/usr/lib" -type f -name 'libbounce.a' | head -n 1)
+	[ -n "$lib_file" ] || fail "Missing libbounce.so in $package_path"
+	[ -n "$static_lib" ] || fail "Missing libbounce.a in $package_path"
+
+	readelf -h "$lib_file" >"$tmp_dir/readelf.txt"
+	assert_contains "$tmp_dir/readelf.txt" "$(expected_elf_class "$expected_arch")"
+	assert_contains "$tmp_dir/readelf.txt" "$(expected_elf_machine "$expected_arch")"
+
+	rm -rf "$tmp_dir"
+}
+
+validate_glib_deb_package() {
+	package_path=$1
+	expected_arch=$2
+	expected_deb_arch=$(deb_arch_name "$expected_arch")
+	tmp_dir=$(mktemp -d)
+
+	assert_file "$package_path"
+	[ "$(dpkg-deb -f "$package_path" Architecture)" = "$expected_deb_arch" ] || fail "Unexpected Architecture field in $package_path"
+	[ "$(dpkg-deb -f "$package_path" Version)" = "$VERSION" ] || fail "Unexpected Version field in $package_path"
+	[ "$(dpkg-deb -f "$package_path" Depends)" = "$BASE_PACKAGE_NAME (= $VERSION)" ] || fail "Unexpected Depends field in $package_path"
+
+	dpkg-deb -x "$package_path" "$tmp_dir"
+
+	[ ! -e "$tmp_dir/usr/include/libbounce" ] || fail "Unexpected headers in $package_path"
+	assert_file "$tmp_dir/usr/share/doc/$GLIB_PACKAGE_NAME/LICENSE"
+	assert_file "$tmp_dir/usr/share/doc/$GLIB_PACKAGE_NAME/README.md"
+	assert_file "$tmp_dir/usr/share/doc/$GLIB_PACKAGE_NAME/README_ja.md"
+
+	lib_file=$(find "$tmp_dir/usr/lib" -type f -name 'libbounce-glib.so' | head -n 1)
+	static_lib=$(find "$tmp_dir/usr/lib" -type f -name 'libbounce-glib.a' | head -n 1)
+	[ -n "$lib_file" ] || fail "Missing libbounce-glib.so in $package_path"
+	[ -n "$static_lib" ] || fail "Missing libbounce-glib.a in $package_path"
+
+	readelf -h "$lib_file" >"$tmp_dir/readelf.txt"
+	assert_contains "$tmp_dir/readelf.txt" "$(expected_elf_class "$expected_arch")"
+	assert_contains "$tmp_dir/readelf.txt" "$(expected_elf_machine "$expected_arch")"
+
+	rm -rf "$tmp_dir"
+}
+
+validate_win32_package() {
+	package_path=$1
+	label=$2
+	tmp_dir=$(mktemp -d)
+	top_dir="$BASE_PACKAGE_NAME-$VERSION-win32-$label"
+
+	assert_file "$package_path"
+	unzip -q "$package_path" -d "$tmp_dir"
+
+	for header_path in "$PROJECT_ROOT"/include/libbounce/*.h; do
+		header_name=$(basename "$header_path")
+		assert_file "$tmp_dir/$top_dir/include/libbounce/$header_name"
+	done
+	assert_file "$tmp_dir/$top_dir/LICENSE"
+	assert_file "$tmp_dir/$top_dir/README.md"
+	assert_file "$tmp_dir/$top_dir/README_ja.md"
+	assert_file "$tmp_dir/$top_dir/bin/libbounce.dll"
+	assert_file "$tmp_dir/$top_dir/lib/libbounce.dll.a"
+	assert_file "$tmp_dir/$top_dir/lib/libbounce.a"
+
+	file "$tmp_dir/$top_dir/bin/libbounce.dll" >"$tmp_dir/file.txt"
+	case $label in
+		x86)
+			assert_contains "$tmp_dir/file.txt" 'PE32 executable (DLL)'
+			assert_contains "$tmp_dir/file.txt" 'Intel 80386'
+			;;
+		x64)
+			assert_contains "$tmp_dir/file.txt" 'PE32+ executable (DLL)'
+			assert_contains "$tmp_dir/file.txt" 'x86-64'
+			;;
+		*)
+			fail "Unsupported Win32 label: $label"
+			;;
+	esac
+
+	rm -rf "$tmp_dir"
+}
+
+validate_package_repository() {
+	package_root="$ARTIFACT_ROOT/$PACKAGE_REPOSITORY_NAME"
+
+	assert_file "$package_root/library.properties"
+	assert_file "$package_root/library.json"
+	assert_file "$package_root/idf_component.yml"
+	assert_file "$package_root/CMakeLists.txt"
+	assert_file "$package_root/LICENSE"
+	assert_file "$package_root/README.md"
+	assert_file "$package_root/README_ja.md"
+
+	for header_path in "$PROJECT_ROOT"/include/libbounce/*.h; do
+		header_name=$(basename "$header_path")
+		assert_file "$package_root/src/libbounce/$header_name"
+	done
+
+	find "$PROJECT_ROOT/src" -type f \( -name '*.c' -o -name '*.h' \) | while IFS= read -r source_path; do
+		relative_path=${source_path#"$PROJECT_ROOT/"}
+		assert_file "$package_root/$relative_path"
+	done
+
+	assert_contains "$package_root/library.properties" "version=$VERSION"
+	assert_contains "$package_root/library.properties" 'architectures=esp32'
+	assert_contains "$package_root/library.json" "\"version\": \"$VERSION\""
+	assert_contains "$package_root/library.json" '"frameworks": ['
+	assert_contains "$package_root/library.json" '"arduino"'
+	assert_contains "$package_root/library.json" '"espidf"'
+	assert_contains "$package_root/idf_component.yml" "version: \"$VERSION\""
+	assert_contains "$package_root/CMakeLists.txt" 'idf_component_register('
+	assert_contains "$package_root/CMakeLists.txt" '"src/freertos/bounce_freertos_fd_espidf.c"'
+}
+
+validate_deb_artifacts() {
+	expected_count=$(( $(count_deb_builds) * 2 ))
+	actual_count=$(count_matching_files "$ARTIFACT_ROOT/deb" '*.deb')
+
+	[ "$actual_count" = "$expected_count" ] || fail "Unexpected deb artifact count: $actual_count"
+	[ "$expected_count" -gt 0 ] || return 0
+
+	require_command readelf
+
+	while IFS=' ' read -r distro release arch platform; do
+		[ -n "$distro" ] || continue
+		matches_filter "$DISTRO_FILTER" "$distro" || continue
+		matches_filter "$RELEASE_FILTER" "$release" || continue
+		matches_filter "$ARCH_FILTER" "$arch" || continue
+		validate_base_deb_package "$(deb_artifact_path "$BASE_PACKAGE_NAME" "$distro" "$release" "$arch")" "$arch"
+		validate_glib_deb_package "$(deb_artifact_path "$GLIB_PACKAGE_NAME" "$distro" "$release" "$arch")" "$arch"
+	done <<EOF
+$LINUX_MATRIX
+EOF
+}
+
+validate_win32_artifacts() {
+	expected_count=$(count_win32_builds)
+	actual_count=$(count_matching_files "$ARTIFACT_ROOT/win32" '*.zip')
+
+	[ "$actual_count" = "$expected_count" ] || fail "Unexpected zip artifact count: $actual_count"
+	[ "$expected_count" -gt 0 ] || return 0
+
+	require_command unzip
+	require_command file
+
+	while IFS=' ' read -r arch compiler; do
+		[ -n "$arch" ] || continue
+		matches_filter "$ARCH_FILTER" "$arch" || continue
+		validate_win32_package "$ARTIFACT_ROOT/win32/${BASE_PACKAGE_NAME}-${VERSION}-win32-$arch.zip" "$arch"
+	done <<EOF
+$WIN32_MATRIX
+EOF
+}
+
+validate_artifacts() {
+	printf '%s\n' 'Validating generated artifacts'
+
+	if [ "$TARGET" = 'all' ] || [ "$TARGET" = 'deb' ]; then
+		validate_deb_artifacts
+	fi
+
+	if [ "$TARGET" = 'all' ] || [ "$TARGET" = 'win32' ]; then
+		validate_win32_artifacts
+	fi
+
+	if [ "$TARGET" = 'all' ] || [ "$TARGET" = 'packages' ]; then
+		validate_package_repository
+	fi
+}
+
 wait_for_oldest_job() {
 	[ "$ACTIVE_JOB_COUNT" -gt 0 ] || return 0
 
@@ -588,5 +869,7 @@ if [ "$TARGET" = 'all' ] || [ "$TARGET" = 'packages' ]; then
 fi
 
 wait_for_all_jobs
+
+validate_artifacts
 
 printf '%s\n' "Artifacts generated in $ARTIFACT_ROOT"

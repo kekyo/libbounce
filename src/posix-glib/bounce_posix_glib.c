@@ -5,14 +5,28 @@
  * https://github.com/kekyo/libbounce
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #if defined(BOUNCE_POSIX_GLIB)
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <glib.h>
 #include <glib-unix.h>
+
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#include <liburing.h>
+#include "../posix/bounce_io_uring_compat.h"
+#endif
 
 #define BOUNCE_UTILS_EXTERN static inline
 #include "libbounce/bounce.h"
@@ -42,6 +56,11 @@
 #define BOUNCE_POSIX_GLIB_CONTAINER_OF(ptr, type, member) \
   ((type *)((char *)(ptr) - offsetof(type, member)))
 
+#if defined(__linux__)
+#define BOUNCE_POSIX_GLIB_IO_URING_QUEUE_DEPTH 256u
+#define BOUNCE_POSIX_GLIB_IO_URING_USER_DATA_CANCEL_FLAG UINT64_C(1)
+#endif
+
 typedef struct BOUNCE_POSIX_GLIB_DISPATCH_CONTEXT {
   struct BOUNCE_POSIX_GLIB_DISPATCH_CONTEXT *previous;
   BOUNCE_CORE *bounce;
@@ -66,6 +85,26 @@ typedef enum __BOUNCE_POSIX_GLIB_START_RESULT {
   __BOUNCE_POSIX_GLIB_START_RESULT_READY_QUEUED = 2,
   __BOUNCE_POSIX_GLIB_START_RESULT_READY_INLINE = 3
 } __BOUNCE_POSIX_GLIB_START_RESULT;
+
+#if defined(__linux__)
+typedef struct __BOUNCE_POSIX_IO_URING_WAIT {
+  struct __BOUNCE_POSIX_IO_URING_WAIT *next;
+  BOUNCE_CORE *bounce;
+  __BOUNCE_COMPLETION_ITEM *item;
+  BOUNCE_POSIX_IO_URING_OP *operation;
+  unsigned int pending_cqe_count;
+} __BOUNCE_POSIX_IO_URING_WAIT;
+
+typedef struct BOUNCE_POSIX_GLIB_IO_URING_SOURCE {
+  GSource source;
+  BOUNCE_CORE *bounce;
+  gpointer tag;
+} BOUNCE_POSIX_GLIB_IO_URING_SOURCE;
+
+static inline bool bounce_posix_glib_submit_cancel_io_uring_wait_locked(
+  BOUNCE_CORE *r,
+  __BOUNCE_POSIX_IO_URING_WAIT *wait);
+#endif
 
 static pthread_once_t bounce_posix_glib_dispatch_tls_once_state = PTHREAD_ONCE_INIT;
 static pthread_key_t bounce_posix_glib_dispatch_tls_key;
@@ -128,6 +167,30 @@ static inline void bounce_posix_glib_signal_parker(BOUNCE_CORE *r) {
   }
 }
 
+#if defined(__linux__)
+static inline int bounce_posix_glib_create_eventfd(void) {
+  return eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+}
+
+static inline void bounce_posix_glib_drain_eventfd(int fd) {
+  eventfd_t counter = 0;
+
+  if (fd < 0) {
+    return;
+  }
+
+  for (;;) {
+    if (eventfd_read(fd, &counter) == 0) {
+      continue;
+    }
+    if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+      return;
+    }
+    return;
+  }
+}
+#endif
+
 static inline void bounce_posix_glib_init_free_item(__BOUNCE_COMPLETION_ITEM *item) {
   memset(item, 0, sizeof *item);
   item->fd = BOUNCE_POSIX_GLIB_INVALID_FD;
@@ -148,6 +211,9 @@ static inline void bounce_posix_glib_prepare_reserved_item(__BOUNCE_COMPLETION_I
   item->cancellation = NULL;
   item->registration_owner = NULL;
   item->source = NULL;
+#if defined(__linux__)
+  item->io_uring_wait = NULL;
+#endif
 }
 
 static inline __BOUNCE_COMPLETION_ITEM *bounce_posix_glib_allocate_completion_item(
@@ -216,6 +282,38 @@ static inline void bounce_posix_glib_queue_ready_locked(
   item->completion_result = result;
   item->state = BOUNCE_COMPLETION_ITEM_STATE_READY;
   bounce_queue_enqueue(&r->ready_queue, &item->ready_or_free_link);
+}
+
+static inline bool bounce_posix_glib_has_pending_waits_locked(BOUNCE_CORE *r) {
+  BOUNCE_DYNAMIC_BLOCK *block;
+
+  for (size_t index = 0u; index < BOUNCE_MAX_STATIC_COMPLETION_ITEMS; index++) {
+    if (r->static_completion_items[index].state ==
+        BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+      return true;
+    }
+  }
+
+  block = r->dynamic_completion_blocks.head;
+  while (block != NULL) {
+    __BOUNCE_COMPLETION_ITEM *items =
+      (__BOUNCE_COMPLETION_ITEM *)bounce_dynamic_block_const_items(block);
+
+    for (size_t index = 0u; index < block->item_count; index++) {
+      if (items[index].state == BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+        return true;
+      }
+    }
+    block = block->next;
+  }
+  return false;
+}
+
+static inline bool bounce_posix_glib_should_exit_locked(BOUNCE_CORE *r) {
+  return (r->shutting_down != 0) &&
+         (r->ready_queue.head == NULL) &&
+         ((r->shutdown_wait_for_idle == 0) ||
+          !bounce_posix_glib_has_pending_waits_locked(r));
 }
 
 static inline bool bounce_posix_glib_can_inline_locked(BOUNCE_CORE *r) {
@@ -291,6 +389,19 @@ static inline GSource *bounce_posix_glib_detach_wait_locked(
   GSource *source = bounce_posix_glib_take_source_locked(r, item);
 
   bounce_posix_glib_unlink_cancellation_locked(item);
+#if defined(__linux__)
+  if (item->io_uring_wait != NULL) {
+    __BOUNCE_POSIX_IO_URING_WAIT *wait = item->io_uring_wait;
+
+    item->io_uring_wait = NULL;
+    wait->item = NULL;
+    if (wait->operation != NULL) {
+      wait->operation->active = 0;
+      wait->operation = NULL;
+    }
+    (void)bounce_posix_glib_submit_cancel_io_uring_wait_locked(r, wait);
+  }
+#endif
   if (item->registration_owner != NULL) {
     if (item->registration_owner->item == item) {
       item->registration_owner->item = NULL;
@@ -383,7 +494,7 @@ static gboolean bounce_posix_glib_ready_source_prepare(
 
   (void)bounce_posix_glib_lock(&ready_source->bounce->lock);
   ready = (ready_source->bounce->ready_queue.head != NULL) ||
-          (ready_source->bounce->shutting_down != 0);
+          bounce_posix_glib_should_exit_locked(ready_source->bounce);
   (void)bounce_posix_glib_unlock(&ready_source->bounce->lock);
   return ready;
 }
@@ -449,6 +560,245 @@ bounce_posix_glib_activate_wait_item_locked(
   }
   return __BOUNCE_POSIX_GLIB_START_RESULT_WAITING;
 }
+
+#if defined(__linux__)
+static inline uint64_t bounce_posix_glib_io_uring_make_user_data(
+  const __BOUNCE_POSIX_IO_URING_WAIT *wait,
+  bool cancel_entry) {
+  return ((uint64_t)(uintptr_t)wait) |
+         (cancel_entry ? BOUNCE_POSIX_GLIB_IO_URING_USER_DATA_CANCEL_FLAG : 0u);
+}
+
+static inline __BOUNCE_POSIX_IO_URING_WAIT *
+bounce_posix_glib_io_uring_wait_from_user_data(uint64_t user_data) {
+  return (__BOUNCE_POSIX_IO_URING_WAIT *)(uintptr_t)(
+    user_data & ~BOUNCE_POSIX_GLIB_IO_URING_USER_DATA_CANCEL_FLAG);
+}
+
+static inline bool bounce_posix_glib_io_uring_user_data_is_cancel(
+  uint64_t user_data) {
+  return (user_data & BOUNCE_POSIX_GLIB_IO_URING_USER_DATA_CANCEL_FLAG) != 0u;
+}
+
+static inline void bounce_posix_glib_link_io_uring_wait_locked(
+  BOUNCE_CORE *r,
+  __BOUNCE_POSIX_IO_URING_WAIT *wait) {
+  wait->next = r->io_uring_waits;
+  r->io_uring_waits = wait;
+}
+
+static inline void bounce_posix_glib_unlink_io_uring_wait_locked(
+  BOUNCE_CORE *r,
+  __BOUNCE_POSIX_IO_URING_WAIT *wait) {
+  __BOUNCE_POSIX_IO_URING_WAIT **current = &r->io_uring_waits;
+
+  while (*current != NULL) {
+    if (*current == wait) {
+      *current = wait->next;
+      wait->next = NULL;
+      return;
+    }
+    current = &(*current)->next;
+  }
+}
+
+static inline __BOUNCE_POSIX_IO_URING_WAIT *
+bounce_posix_glib_allocate_io_uring_wait(void) {
+  return (__BOUNCE_POSIX_IO_URING_WAIT *)calloc(1u, sizeof(__BOUNCE_POSIX_IO_URING_WAIT));
+}
+
+static inline void bounce_posix_glib_free_io_uring_wait_locked(
+  BOUNCE_CORE *r,
+  __BOUNCE_POSIX_IO_URING_WAIT *wait) {
+  if (wait == NULL) {
+    return;
+  }
+
+  bounce_posix_glib_unlink_io_uring_wait_locked(r, wait);
+  free(wait);
+}
+
+static inline bool bounce_posix_glib_submit_cancel_io_uring_wait_locked(
+  BOUNCE_CORE *r,
+  __BOUNCE_POSIX_IO_URING_WAIT *wait) {
+  struct io_uring_sqe *sqe;
+  int submit_result;
+
+  if ((r == NULL) ||
+      (wait == NULL) ||
+      (r->io_uring_ring == NULL)) {
+    return false;
+  }
+
+  sqe = io_uring_get_sqe(r->io_uring_ring);
+  if (sqe == NULL) {
+    submit_result = io_uring_submit(r->io_uring_ring);
+    if (submit_result < 0) {
+      return false;
+    }
+    sqe = io_uring_get_sqe(r->io_uring_ring);
+    if (sqe == NULL) {
+      return false;
+    }
+  }
+
+  bounce_io_uring_prep_cancel_user_data(
+    sqe,
+    bounce_posix_glib_io_uring_make_user_data(wait, false),
+    0);
+  bounce_io_uring_sqe_set_user_data(
+    sqe,
+    bounce_posix_glib_io_uring_make_user_data(wait, true));
+  wait->pending_cqe_count += 1u;
+  submit_result = io_uring_submit(r->io_uring_ring);
+  if (submit_result < 0) {
+    wait->pending_cqe_count -= 1u;
+    return false;
+  }
+  return true;
+}
+
+static inline void bounce_posix_glib_complete_io_uring_item_locked(
+  BOUNCE_CORE *r,
+  __BOUNCE_COMPLETION_ITEM *item,
+  BOUNCE_COMPLETION_RESULT result) {
+  __BOUNCE_POSIX_IO_URING_WAIT *wait;
+
+  if ((r == NULL) || (item == NULL)) {
+    return;
+  }
+
+  wait = item->io_uring_wait;
+  if (wait != NULL) {
+    item->io_uring_wait = NULL;
+    wait->item = NULL;
+    if (wait->operation != NULL) {
+      wait->operation->active = 0;
+      wait->operation = NULL;
+    }
+    (void)bounce_posix_glib_submit_cancel_io_uring_wait_locked(r, wait);
+  }
+
+  bounce_posix_glib_unlink_cancellation_locked(item);
+  if (item->registration_owner != NULL) {
+    if (item->registration_owner->item == item) {
+      item->registration_owner->item = NULL;
+    }
+    item->registration_owner = NULL;
+  }
+  bounce_posix_glib_queue_ready_locked(r, item, result);
+}
+
+static inline void bounce_posix_glib_drain_io_uring_locked(BOUNCE_CORE *r) {
+  struct io_uring_cqe *cqe = NULL;
+
+  if ((r == NULL) || (r->io_uring_ring == NULL)) {
+    return;
+  }
+
+  while (io_uring_peek_cqe(r->io_uring_ring, &cqe) == 0) {
+    __BOUNCE_POSIX_IO_URING_WAIT *wait =
+      bounce_posix_glib_io_uring_wait_from_user_data(cqe->user_data);
+    const bool cancel_entry =
+      bounce_posix_glib_io_uring_user_data_is_cancel(cqe->user_data);
+
+    if (wait != NULL) {
+      if (!cancel_entry && (wait->operation != NULL)) {
+        wait->operation->result = cqe->res;
+        wait->operation->cqe_flags = cqe->flags;
+        wait->operation->active = 0;
+      }
+
+      if (!cancel_entry && (wait->item != NULL)) {
+        __BOUNCE_COMPLETION_ITEM *item = wait->item;
+
+        item->io_uring_wait = NULL;
+        wait->item = NULL;
+        wait->operation = NULL;
+        bounce_posix_glib_unlink_cancellation_locked(item);
+        if (item->registration_owner != NULL) {
+          if (item->registration_owner->item == item) {
+            item->registration_owner->item = NULL;
+          }
+          item->registration_owner = NULL;
+        }
+        bounce_posix_glib_queue_ready_locked(
+          r,
+          item,
+          BOUNCE_COMPLETION_COMPLETED);
+      }
+
+      if (wait->pending_cqe_count > 0u) {
+        wait->pending_cqe_count -= 1u;
+      }
+      if ((wait->pending_cqe_count == 0u) &&
+          (wait->item == NULL)) {
+        bounce_posix_glib_free_io_uring_wait_locked(r, wait);
+      }
+    }
+
+    io_uring_cqe_seen(r->io_uring_ring, cqe);
+  }
+}
+
+static gboolean bounce_posix_glib_io_uring_source_prepare(
+  GSource *source,
+  gint *timeout_) {
+  (void)source;
+  if (timeout_ != NULL) {
+    *timeout_ = -1;
+  }
+  return FALSE;
+}
+
+static gboolean bounce_posix_glib_io_uring_source_check(GSource *source) {
+  BOUNCE_POSIX_GLIB_IO_URING_SOURCE *io_source =
+    (BOUNCE_POSIX_GLIB_IO_URING_SOURCE *)source;
+  GIOCondition revents;
+
+  if (io_source->tag == NULL) {
+    return FALSE;
+  }
+
+  revents = g_source_query_unix_fd(source, io_source->tag);
+  return (revents & (G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL)) != 0;
+}
+
+static gboolean bounce_posix_glib_io_uring_source_dispatch(
+  GSource *source,
+  GSourceFunc callback,
+  gpointer user_data) {
+  BOUNCE_POSIX_GLIB_IO_URING_SOURCE *io_source =
+    (BOUNCE_POSIX_GLIB_IO_URING_SOURCE *)source;
+  bool wake_parker = false;
+
+  (void)callback;
+  (void)user_data;
+  if (io_source->bounce == NULL) {
+    return G_SOURCE_CONTINUE;
+  }
+
+  (void)bounce_posix_glib_lock(&io_source->bounce->lock);
+  bounce_posix_glib_drain_eventfd(io_source->bounce->io_uring_event_fd);
+  bounce_posix_glib_drain_io_uring_locked(io_source->bounce);
+  wake_parker = (io_source->bounce->ready_queue.head != NULL);
+  (void)bounce_posix_glib_unlock(&io_source->bounce->lock);
+
+  if (wake_parker) {
+    bounce_posix_glib_signal_parker(io_source->bounce);
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+static GSourceFuncs bounce_posix_glib_io_uring_source_funcs = {
+  bounce_posix_glib_io_uring_source_prepare,
+  bounce_posix_glib_io_uring_source_check,
+  bounce_posix_glib_io_uring_source_dispatch,
+  NULL,
+  NULL,
+  NULL
+};
+#endif
 
 static gboolean bounce_posix_glib_fd_source_prepare(
   GSource *source,
@@ -548,11 +898,9 @@ static inline GSource *bounce_posix_glib_abort_pending_item_locked(
   return source;
 }
 
-/**
- * @brief Initialize the bounce.
- * @param r BOUNCE_CORE structure space provided by the caller.
- */
-void bounce_init(BOUNCE_CORE *r) {
+static void bounce_posix_glib_init_core(
+  BOUNCE_CORE *r,
+  GMainContext *main_context) {
   BOUNCE_POSIX_GLIB_READY_SOURCE *ready_source;
 
   if (r == NULL) {
@@ -564,7 +912,13 @@ void bounce_init(BOUNCE_CORE *r) {
   bounce_queue_init(&r->ready_queue);
   bounce_stack_init(&r->free_items);
   bounce_dynamic_block_list_init(&r->dynamic_completion_blocks);
-  r->main_context = g_main_context_new();
+#if defined(__linux__)
+  r->io_uring_event_fd = -1;
+#endif
+  r->main_context =
+    (main_context != NULL) ?
+      g_main_context_ref(main_context) :
+      g_main_context_new();
 
   for (size_t index = 0u; index < BOUNCE_MAX_STATIC_COMPLETION_ITEMS; index++) {
     bounce_posix_glib_init_free_item(&r->static_completion_items[index]);
@@ -588,7 +942,119 @@ void bounce_init(BOUNCE_CORE *r) {
   g_source_set_priority(&ready_source->source, G_PRIORITY_HIGH);
   (void)g_source_attach(&ready_source->source, r->main_context);
   r->ready_source = &ready_source->source;
+
+#if defined(__linux__)
+  r->io_uring_ring =
+    (struct io_uring *)calloc(1u, sizeof(struct io_uring));
+  if (r->io_uring_ring != NULL) {
+    if (io_uring_queue_init(
+          BOUNCE_POSIX_GLIB_IO_URING_QUEUE_DEPTH,
+          r->io_uring_ring,
+          0u) == 0) {
+      r->io_uring_event_fd = bounce_posix_glib_create_eventfd();
+      if ((r->io_uring_event_fd >= 0) &&
+          (io_uring_register_eventfd(
+             r->io_uring_ring,
+             r->io_uring_event_fd) == 0)) {
+        BOUNCE_POSIX_GLIB_IO_URING_SOURCE *io_source =
+          (BOUNCE_POSIX_GLIB_IO_URING_SOURCE *)g_source_new(
+            &bounce_posix_glib_io_uring_source_funcs,
+            sizeof *io_source);
+
+        if (io_source != NULL) {
+          guint source_id;
+
+          io_source->bounce = r;
+          io_source->tag = g_source_add_unix_fd(
+            &io_source->source,
+            r->io_uring_event_fd,
+            (GIOCondition)(G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL));
+          if (io_source->tag != NULL) {
+            source_id = g_source_attach(&io_source->source, r->main_context);
+            if (source_id != 0u) {
+              r->io_uring_event_source = &io_source->source;
+            }
+          }
+          if (r->io_uring_event_source == NULL) {
+            g_source_unref(&io_source->source);
+          } else {
+            g_source_unref(&io_source->source);
+          }
+        }
+      }
+
+      if (r->io_uring_event_source == NULL) {
+        if (r->io_uring_event_fd >= 0) {
+          (void)close(r->io_uring_event_fd);
+          r->io_uring_event_fd = -1;
+        }
+        io_uring_queue_exit(r->io_uring_ring);
+        free(r->io_uring_ring);
+        r->io_uring_ring = NULL;
+      }
+    } else {
+      free(r->io_uring_ring);
+      r->io_uring_ring = NULL;
+    }
+  }
+#endif
 }
+
+/**
+ * @brief Initialize the bounce.
+ * @param r BOUNCE_CORE structure space provided by the caller.
+ */
+void bounce_init(BOUNCE_CORE *r) {
+  bounce_posix_glib_init_core(r, NULL);
+}
+
+/**
+ * @brief Initialize the GLib backend with an explicit `GMainContext`.
+ * @param r BOUNCE_CORE structure space provided by the caller.
+ * @param main_context GLib main context to drive from `bounce_park()`, or
+ * `NULL` to create a private context like `bounce_init()`.
+ */
+void bounce_init_with_main_context(
+  BOUNCE_CORE *r,
+  GMainContext *main_context) {
+  bounce_posix_glib_init_core(r, main_context);
+}
+
+#if defined(__linux__)
+void bounce_posix_io_uring_op_init(
+  BOUNCE_POSIX_IO_URING_OP *op,
+  BOUNCE_POSIX_IO_URING_PREPARE prepare,
+  void *prepare_state) {
+  if (op == NULL) {
+    return;
+  }
+
+  memset(op, 0, sizeof *op);
+  op->prepare = prepare;
+  op->prepare_state = prepare_state;
+}
+
+void bounce_posix_io_uring_op_deinit(BOUNCE_POSIX_IO_URING_OP *op) {
+  if (op == NULL) {
+    return;
+  }
+
+  op->prepare = NULL;
+  op->prepare_state = NULL;
+  op->result = 0;
+  op->cqe_flags = 0u;
+  op->active = 0;
+}
+
+int bounce_posix_io_uring_op_result(const BOUNCE_POSIX_IO_URING_OP *op) {
+  return (op != NULL) ? op->result : 0;
+}
+
+unsigned int bounce_posix_io_uring_op_cqe_flags(
+  const BOUNCE_POSIX_IO_URING_OP *op) {
+  return (op != NULL) ? op->cqe_flags : 0u;
+}
+#endif
 
 /**
  * @brief Park current thread and run continuation repeatedly.
@@ -606,8 +1072,7 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
     }
 
     (void)bounce_posix_glib_lock(&r->lock);
-    if ((r->shutting_down != 0) &&
-        (r->ready_queue.head == NULL)) {
+    if (bounce_posix_glib_should_exit_locked(r)) {
       (void)bounce_posix_glib_unlock(&r->lock);
       return true;
     }
@@ -824,19 +1289,169 @@ void bounce_await_posix_glib_fd(
   }
 }
 
+#if defined(__linux__)
+void bounce_await_posix_glib_io_uring_op(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_IO_URING_OP *op,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation) {
+  __BOUNCE_COMPLETION_ITEM *item;
+  __BOUNCE_POSIX_IO_URING_WAIT *wait = NULL;
+  __BOUNCE_POSIX_GLIB_START_RESULT start_result;
+  bool free_wait = false;
+
+  if ((r == NULL) ||
+      (op == NULL) ||
+      (op->prepare == NULL) ||
+      (completion == NULL)) {
+    bounce_posix_glib_complete_direct(
+      completion,
+      completion_state,
+      BOUNCE_COMPLETION_ABORTED);
+    return;
+  }
+
+  item = bounce_posix_glib_allocate_completion_item(r);
+  wait = bounce_posix_glib_allocate_io_uring_wait();
+  if ((item == NULL) || (wait == NULL)) {
+    bounce_posix_glib_recycle_completion_item(r, item);
+    free(wait);
+    bounce_posix_glib_complete_direct(
+      completion,
+      completion_state,
+      BOUNCE_COMPLETION_ABORTED);
+    return;
+  }
+
+  item->bounce = r;
+  item->completion = completion;
+  item->completion_state = completion_state;
+  wait->bounce = r;
+  wait->item = item;
+  wait->operation = op;
+  wait->pending_cqe_count = 1u;
+
+  (void)bounce_posix_glib_lock(&r->lock);
+  start_result = bounce_posix_glib_activate_wait_item_locked(
+    r,
+    item,
+    cancellation);
+  if (start_result == __BOUNCE_POSIX_GLIB_START_RESULT_WAITING) {
+    struct io_uring_sqe *sqe = NULL;
+    int submit_result;
+
+    if ((r->io_uring_ring == NULL) ||
+        (op->active != 0)) {
+      if (item->registration_owner != NULL) {
+        item->registration_owner->item = NULL;
+        item->registration_owner = NULL;
+      }
+      bounce_posix_glib_unlink_cancellation_locked(item);
+      item->state = BOUNCE_COMPLETION_ITEM_STATE_CLAIMED;
+      start_result = bounce_posix_glib_finish_immediate_item_locked(
+        r,
+        item,
+        BOUNCE_COMPLETION_ABORTED);
+      free_wait = true;
+    } else {
+      sqe = io_uring_get_sqe(r->io_uring_ring);
+      if (sqe == NULL) {
+        submit_result = io_uring_submit(r->io_uring_ring);
+        if (submit_result >= 0) {
+          sqe = io_uring_get_sqe(r->io_uring_ring);
+        }
+      }
+
+      if (sqe == NULL) {
+        if (item->registration_owner != NULL) {
+          item->registration_owner->item = NULL;
+          item->registration_owner = NULL;
+        }
+        bounce_posix_glib_unlink_cancellation_locked(item);
+        item->state = BOUNCE_COMPLETION_ITEM_STATE_CLAIMED;
+        start_result = bounce_posix_glib_finish_immediate_item_locked(
+          r,
+          item,
+          BOUNCE_COMPLETION_ABORTED);
+        free_wait = true;
+      } else {
+        item->io_uring_wait = wait;
+        bounce_posix_glib_link_io_uring_wait_locked(r, wait);
+        op->result = 0;
+        op->cqe_flags = 0u;
+        op->active = 1;
+        op->prepare(sqe, op->prepare_state);
+        bounce_io_uring_sqe_set_user_data(
+          sqe,
+          bounce_posix_glib_io_uring_make_user_data(wait, false));
+        submit_result = io_uring_submit(r->io_uring_ring);
+        if (submit_result < 0) {
+          item->io_uring_wait = NULL;
+          bounce_posix_glib_unlink_io_uring_wait_locked(r, wait);
+          op->active = 0;
+          if (item->registration_owner != NULL) {
+            item->registration_owner->item = NULL;
+            item->registration_owner = NULL;
+          }
+          bounce_posix_glib_unlink_cancellation_locked(item);
+          item->state = BOUNCE_COMPLETION_ITEM_STATE_CLAIMED;
+          start_result = bounce_posix_glib_finish_immediate_item_locked(
+            r,
+            item,
+            BOUNCE_COMPLETION_ABORTED);
+          free_wait = true;
+        } else {
+          bounce_posix_glib_signal_parker(r);
+        }
+      }
+    }
+  }
+  (void)bounce_posix_glib_unlock(&r->lock);
+
+  if (free_wait) {
+    free(wait);
+  }
+
+  switch (start_result) {
+    case __BOUNCE_POSIX_GLIB_START_RESULT_WAITING:
+      return;
+    case __BOUNCE_POSIX_GLIB_START_RESULT_READY_QUEUED:
+      bounce_posix_glib_signal_parker(r);
+      return;
+    case __BOUNCE_POSIX_GLIB_START_RESULT_READY_INLINE:
+      bounce_posix_glib_execute_claimed_item(r, item, 0u);
+      return;
+    case __BOUNCE_POSIX_GLIB_START_RESULT_FAILED:
+    default:
+      bounce_posix_glib_recycle_completion_item(r, item);
+      bounce_posix_glib_complete_direct(
+        completion,
+        completion_state,
+        BOUNCE_COMPLETION_ABORTED);
+      return;
+  }
+}
+#endif
+
 //////////////////////////////////////////////////////////////////////////////////
 
 /**
  * @brief Shutdown parking threads.
  * @param r Initialized BOUNCE_CORE.
  */
-void bounce_shutdown(BOUNCE_CORE *r) {
+void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle) {
   if (r == NULL) {
     return;
   }
 
   (void)bounce_posix_glib_lock(&r->lock);
   r->shutting_down = 1;
+  if (wait_for_idle) {
+    r->shutdown_wait_for_idle = 1;
+  } else {
+    r->shutdown_wait_for_idle = 0;
+  }
   (void)bounce_posix_glib_unlock(&r->lock);
 
   bounce_posix_glib_signal_parker(r);
@@ -854,7 +1469,7 @@ void bounce_deinit(BOUNCE_CORE *r) {
     return;
   }
 
-  bounce_shutdown(r);
+  bounce_shutdown(r, false);
   bounce_queue_init(&abort_queue);
 
   (void)bounce_posix_glib_lock(&r->lock);
@@ -905,6 +1520,29 @@ void bounce_deinit(BOUNCE_CORE *r) {
       item->completion_state,
       BOUNCE_COMPLETION_ABORTED);
   }
+
+#if defined(__linux__)
+  if (r->io_uring_event_source != NULL) {
+    g_source_destroy(r->io_uring_event_source);
+    g_source_unref(r->io_uring_event_source);
+    r->io_uring_event_source = NULL;
+  }
+  if (r->io_uring_ring != NULL) {
+    io_uring_queue_exit(r->io_uring_ring);
+    free(r->io_uring_ring);
+    r->io_uring_ring = NULL;
+  }
+  if (r->io_uring_event_fd >= 0) {
+    (void)close(r->io_uring_event_fd);
+    r->io_uring_event_fd = -1;
+  }
+  while (r->io_uring_waits != NULL) {
+    __BOUNCE_POSIX_IO_URING_WAIT *wait = r->io_uring_waits;
+
+    r->io_uring_waits = wait->next;
+    free(wait);
+  }
+#endif
 
   if (r->ready_source != NULL) {
     g_source_destroy(r->ready_source);
@@ -1101,6 +1739,17 @@ void bounce_cancel(
     if (item->state != BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
       continue;
     }
+
+#if defined(__linux__)
+    if (item->io_uring_wait != NULL) {
+      bounce_posix_glib_complete_io_uring_item_locked(
+        r,
+        item,
+        BOUNCE_COMPLETION_CANCELED);
+      wake_parker = true;
+      continue;
+    }
+#endif
 
     source = bounce_posix_glib_take_source_locked(r, item);
     if (item->registration_owner != NULL) {

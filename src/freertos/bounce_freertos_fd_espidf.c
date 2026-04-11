@@ -320,7 +320,8 @@ static void bounce_freertos_fd_waiter_task(void *parameter) {
     if (build_context.wake_parkers) {
       bounce_freertos_signal_parkers(bounce);
     }
-    if (bounce->shutting_down != 0) {
+    if ((bounce->shutting_down != 0) &&
+        (bounce->shutdown_wait_for_idle == 0)) {
       break;
     }
     if (build_context.max_fd < 0) {
@@ -371,11 +372,13 @@ static void bounce_freertos_fd_waiter_task(void *parameter) {
     if ((backend->control_event_fd >= 0) &&
         FD_ISSET(backend->control_event_fd, &read_fds)) {
       bounce_freertos_fd_drain_waiter_signal(backend->control_event_fd);
-      if (bounce->shutting_down != 0) {
+      if ((bounce->shutting_down != 0) &&
+          (bounce->shutdown_wait_for_idle == 0)) {
         break;
       }
     }
-    if (bounce->shutting_down != 0) {
+    if ((bounce->shutting_down != 0) &&
+        (bounce->shutdown_wait_for_idle == 0)) {
       break;
     }
 

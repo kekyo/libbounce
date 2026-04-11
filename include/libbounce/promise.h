@@ -1041,6 +1041,50 @@ inline await_operation bounce::await(
     },
     cancellation);
 }
+
+#if defined(__linux__)
+inline await_operation bounce_ref::await(
+  BOUNCE_POSIX_IO_URING_OP &operation,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  BOUNCE_CORE *core = this->get_core();
+
+  return make_awaitable(
+    *this,
+    [core, &operation](
+      BOUNCE_COMPLETION completion,
+      void *completion_state,
+      BOUNCE_CANCELLATION *operation_cancellation) noexcept {
+      ::bounce_await_posix_io_uring_op(
+        core,
+        &operation,
+        completion,
+        completion_state,
+        operation_cancellation);
+    },
+    cancellation);
+}
+
+inline await_operation bounce::await(
+  BOUNCE_POSIX_IO_URING_OP &operation,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  BOUNCE_CORE *core = this->get_core();
+
+  return make_awaitable(
+    *this,
+    [core, &operation](
+      BOUNCE_COMPLETION completion,
+      void *completion_state,
+      BOUNCE_CANCELLATION *operation_cancellation) noexcept {
+      ::bounce_await_posix_io_uring_op(
+        core,
+        &operation,
+        completion,
+        completion_state,
+        operation_cancellation);
+    },
+    cancellation);
+}
+#endif
 #endif
 
 #if defined(BOUNCE_POSIX_GLIB)
@@ -1089,6 +1133,50 @@ inline await_operation bounce::await(
     },
     cancellation);
 }
+
+#if defined(__linux__)
+inline await_operation bounce_ref::await(
+  BOUNCE_POSIX_IO_URING_OP &operation,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  BOUNCE_CORE *core = this->get_core();
+
+  return make_awaitable(
+    *this,
+    [core, &operation](
+      BOUNCE_COMPLETION completion,
+      void *completion_state,
+      BOUNCE_CANCELLATION *operation_cancellation) noexcept {
+      ::bounce_await_posix_glib_io_uring_op(
+        core,
+        &operation,
+        completion,
+        completion_state,
+        operation_cancellation);
+    },
+    cancellation);
+}
+
+inline await_operation bounce::await(
+  BOUNCE_POSIX_IO_URING_OP &operation,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  BOUNCE_CORE *core = this->get_core();
+
+  return make_awaitable(
+    *this,
+    [core, &operation](
+      BOUNCE_COMPLETION completion,
+      void *completion_state,
+      BOUNCE_CANCELLATION *operation_cancellation) noexcept {
+      ::bounce_await_posix_glib_io_uring_op(
+        core,
+        &operation,
+        completion,
+        completion_state,
+        operation_cancellation);
+    },
+    cancellation);
+}
+#endif
 #endif
 
 #if defined(BOUNCE_FREERTOS)
