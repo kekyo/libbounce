@@ -76,6 +76,96 @@ struct await_result {
   }
 };
 
+/**
+ * @brief Promise result produced by callback-backed helpers.
+ * @tparam T Mapped callback payload type, or `void`.
+ * @remarks The helper-level completion state is reported through @ref await.
+ * The mapped value is engaged only after a normal completion.
+ */
+template<typename T>
+struct callback_promise_result {
+  await_result await {};
+  std::optional<T> value {};
+
+  /**
+   * @brief Check whether the callback helper completed normally.
+   * @return True when the callback fired and the helper completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the callback helper completed by cancellation.
+   * @return True when the helper observed cancellation.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the callback helper completed as aborted.
+   * @return True when the helper aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether the callback helper failed before registration started.
+   * @return True when setup failed before the callback registration began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+};
+
+/**
+ * @brief Promise result produced by callback-backed helpers for `void` payloads.
+ */
+template<>
+struct callback_promise_result<void> {
+  await_result await {};
+
+  /**
+   * @brief Check whether the callback helper completed normally.
+   * @return True when the callback fired and the helper completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the callback helper completed by cancellation.
+   * @return True when the helper observed cancellation.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the callback helper completed as aborted.
+   * @return True when the helper aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether the callback helper failed before registration started.
+   * @return True when setup failed before the callback registration began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+};
+
+template<typename TBOUNCE_HANDLE, typename START_FN>
+inline await_operation make_awaitable(
+  TBOUNCE_HANDLE &bounce_handle,
+  START_FN&& start,
+  BOUNCE_CANCELLATION *cancellation = nullptr) noexcept;
+
 namespace detail {
 
 static inline await_result await_result_from_completion(
@@ -120,6 +210,8 @@ public:
 template<typename T>
 class promise_shared_state {
 public:
+  std::atomic<unsigned int> suspend_state_ { 0u };
+  std::atomic<unsigned int> start_returned_ { 0u };
   std::coroutine_handle<> continuation_;
   BOUNCE_CORE *continuation_bounce_ = nullptr;
   std::coroutine_handle<> handle_;
@@ -177,9 +269,20 @@ struct promise_final_awaiter {
 
   inline void await_suspend(std::coroutine_handle<TPROMISE> completed_handle) const noexcept {
     auto state = completed_handle.promise().state_;
+    unsigned int previous = 0u;
 
     state->completed_.store(true, std::memory_order_release);
     if (!state->continuation_) {
+      return;
+    }
+
+    if (state->start_returned_.load(std::memory_order_acquire) != 0u) {
+      previous = state->suspend_state_.exchange(3u, std::memory_order_acq_rel);
+      if ((previous != 0u) && (previous != 1u)) {
+        return;
+      }
+    } else {
+      (void)state->suspend_state_.exchange(2u, std::memory_order_acq_rel);
       return;
     }
 
@@ -242,16 +345,27 @@ public:
   }
 
   inline bool await_suspend(std::coroutine_handle<> continuation) noexcept {
-    if (!state_) {
+    auto state = state_;
+    unsigned int expected = 0u;
+
+    if (!state) {
       return false;
     }
 
-    state_->continuation_ = continuation;
-    state_->continuation_bounce_ = ::bounce_get_core();
-    if (!state_->started_.exchange(true, std::memory_order_acq_rel)) {
-      state_->handle_.resume();
+    state->continuation_ = continuation;
+    state->continuation_bounce_ = ::bounce_get_core();
+    if (!state->started_.exchange(true, std::memory_order_acq_rel)) {
+      state->handle_.resume();
     }
-    return !state_->completed_.load(std::memory_order_acquire);
+    state->start_returned_.store(1u, std::memory_order_release);
+    if (state->suspend_state_.compare_exchange_strong(
+      expected,
+      1u,
+      std::memory_order_acq_rel,
+      std::memory_order_acquire)) {
+      return true;
+    }
+    return expected == 3u;
   }
 
   inline T await_resume() {
@@ -298,16 +412,27 @@ public:
   }
 
   inline bool await_suspend(std::coroutine_handle<> continuation) noexcept {
-    if (!state_) {
+    auto state = state_;
+    unsigned int expected = 0u;
+
+    if (!state) {
       return false;
     }
 
-    state_->continuation_ = continuation;
-    state_->continuation_bounce_ = ::bounce_get_core();
-    if (!state_->started_.exchange(true, std::memory_order_acq_rel)) {
-      state_->handle_.resume();
+    state->continuation_ = continuation;
+    state->continuation_bounce_ = ::bounce_get_core();
+    if (!state->started_.exchange(true, std::memory_order_acq_rel)) {
+      state->handle_.resume();
     }
-    return !state_->completed_.load(std::memory_order_acquire);
+    state->start_returned_.store(1u, std::memory_order_release);
+    if (state->suspend_state_.compare_exchange_strong(
+      expected,
+      1u,
+      std::memory_order_acq_rel,
+      std::memory_order_acquire)) {
+      return true;
+    }
+    return expected == 3u;
   }
 
   inline void await_resume() {
@@ -880,6 +1005,203 @@ public:
   }
 };
 
+namespace detail {
+
+template<typename TResult, typename TMAPPER, typename... TCALLBACK_ARGS>
+class callback_promise_context {
+private:
+  using mapper_type = typename std::decay<TMAPPER>::type;
+
+  BOUNCE_CORE *bounce_;
+  BOUNCE_COMPLETION completion_ = nullptr;
+  void *completion_state_ = nullptr;
+  mapper_type mapper_;
+  promise_storage<TResult> storage_{};
+  std::exception_ptr exception_{};
+
+  static inline void complete_on_bounce(
+    BOUNCE_COMPLETION_RESULT result,
+    void *completion_state) noexcept {
+    auto *context =
+      static_cast<callback_promise_context *>(completion_state);
+
+    if (context->completion_ != nullptr) {
+      context->completion_(result, context->completion_state_);
+    }
+  }
+
+public:
+  template<typename TMAPPER_ARG>
+  explicit inline callback_promise_context(
+    BOUNCE_CORE *bounce,
+    TMAPPER_ARG&& mapper)
+    : bounce_(bounce),
+      mapper_(std::forward<TMAPPER_ARG>(mapper)) {
+  }
+
+  callback_promise_context(const callback_promise_context&) = delete;
+  callback_promise_context& operator=(const callback_promise_context&) = delete;
+
+  callback_promise_context(callback_promise_context&&) = delete;
+  callback_promise_context& operator=(callback_promise_context&&) = delete;
+
+  template<typename TSTART_FN>
+  inline bool start(
+    TSTART_FN &start,
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    using callback_type = void (*)(void *, TCALLBACK_ARGS...);
+
+    completion_ = completion;
+    completion_state_ = completion_state;
+
+    try {
+      if constexpr (
+        std::is_invocable_v<
+          TSTART_FN&,
+          callback_type,
+          void *,
+          BOUNCE_CANCELLATION *>) {
+        using start_result = std::invoke_result_t<
+          TSTART_FN&,
+          callback_type,
+          void *,
+          BOUNCE_CANCELLATION *>;
+
+        static_assert(
+          std::is_same_v<start_result, bool> ||
+          std::is_same_v<start_result, void>,
+          "start must return bool or void");
+
+        if constexpr (std::is_same_v<start_result, bool>) {
+          return start(
+            &callback_promise_context::callback,
+            this,
+            cancellation);
+        } else {
+          start(
+            &callback_promise_context::callback,
+            this,
+            cancellation);
+          return true;
+        }
+      } else {
+        static_assert(
+          std::is_invocable_v<TSTART_FN&, callback_type, void *>,
+          "start must be invocable with (callback, void*) or (callback, void*, BOUNCE_CANCELLATION*)");
+
+        using start_result = std::invoke_result_t<
+          TSTART_FN&,
+          callback_type,
+          void *>;
+
+        static_assert(
+          std::is_same_v<start_result, bool> ||
+          std::is_same_v<start_result, void>,
+          "start must return bool or void");
+
+        if constexpr (std::is_same_v<start_result, bool>) {
+          return start(
+            &callback_promise_context::callback,
+            this);
+        } else {
+          start(
+            &callback_promise_context::callback,
+            this);
+          return true;
+        }
+      }
+    } catch (...) {
+      exception_ = std::current_exception();
+      return false;
+    }
+  }
+
+  inline callback_promise_result<TResult> consume(await_result await) {
+    if (exception_) {
+      std::exception_ptr captured = exception_;
+
+      exception_ = nullptr;
+      std::rethrow_exception(captured);
+    }
+
+    callback_promise_result<TResult> result {};
+    result.await = await;
+    if constexpr (!std::is_void_v<TResult>) {
+      if (await.completed()) {
+        result.value.emplace(storage_.consume());
+      }
+    }
+    return result;
+  }
+
+  static inline void callback(
+    void *opaque,
+    TCALLBACK_ARGS... args) noexcept {
+    auto *context = static_cast<callback_promise_context *>(opaque);
+    BOUNCE_COMPLETION_RESULT completion_result =
+      BOUNCE_COMPLETION_COMPLETED;
+
+    try {
+      if constexpr (std::is_void_v<TResult>) {
+        context->mapper_(args...);
+        context->storage_.emplace();
+      } else {
+        context->storage_.emplace(context->mapper_(args...));
+      }
+    } catch (...) {
+      context->exception_ = std::current_exception();
+      completion_result = BOUNCE_COMPLETION_ABORTED;
+    }
+
+    if ((context->bounce_ != nullptr) &&
+        ::bounce_post(
+          context->bounce_,
+          &callback_promise_context::complete_on_bounce,
+          context)) {
+      return;
+    }
+
+    complete_on_bounce(completion_result, context);
+  }
+};
+
+template<typename TResult, typename... TCALLBACK_ARGS, typename TBOUNCE_HANDLE, typename TSTART_FN, typename TMAPPER>
+static inline promise<callback_promise_result<TResult>>
+make_callback_promise_impl(
+  TBOUNCE_HANDLE &bounce_handle,
+  TSTART_FN&& start,
+  TMAPPER&& mapper,
+  BOUNCE_CANCELLATION *cancellation) {
+  using context_type =
+    callback_promise_context<TResult, TMAPPER, TCALLBACK_ARGS...>;
+  using start_type = typename std::decay<TSTART_FN>::type;
+
+  start_type starter(std::forward<TSTART_FN>(start));
+  context_type context(
+    bounce_handle.get_core(),
+    std::forward<TMAPPER>(mapper));
+  const await_result result =
+    co_await make_awaitable(
+      bounce_handle,
+      [&context, &starter](
+        BOUNCE_COMPLETION completion,
+        void *completion_state,
+        BOUNCE_CANCELLATION *operation_cancellation) noexcept -> bool {
+        return context.start(
+          starter,
+          completion,
+          completion_state,
+          operation_cancellation);
+      },
+      cancellation);
+
+  co_return context.consume(result);
+}
+
+}  // namespace detail
+
 template<typename TBOUNCE_HANDLE, typename START_FN>
 /**
  * @brief Build a coroutine awaitable from a callback-based libbounce starter.
@@ -893,12 +1215,47 @@ template<typename TBOUNCE_HANDLE, typename START_FN>
 inline await_operation make_awaitable(
   TBOUNCE_HANDLE &bounce_handle,
   START_FN&& start,
-  BOUNCE_CANCELLATION *cancellation = nullptr) noexcept {
+  BOUNCE_CANCELLATION *cancellation) noexcept {
   return (bounce_handle.get_core() != nullptr) ?
            await_operation::create(
              std::forward<START_FN>(start),
              cancellation) :
            await_operation::from_immediate(await_result { await_status::start_failed });
+}
+
+template<typename TResult, typename... TCALLBACK_ARGS, typename TBOUNCE_HANDLE, typename TSTART_FN, typename TMAPPER>
+/**
+ * @brief Build a coroutine promise from a single-shot C callback registration.
+ * @tparam TResult Mapped callback payload type, or `void`.
+ * @tparam TCALLBACK_ARGS Callback payload argument types that follow the opaque
+ * state pointer.
+ * @tparam TBOUNCE_HANDLE Bounce handle type exposing `get_core()`.
+ * @tparam TSTART_FN Callback registration starter type.
+ * @tparam TMAPPER Mapper that converts callback payload arguments into
+ * @p TResult.
+ * @param bounce_handle Bounce handle used to marshal continuation resumption.
+ * @param start Starter that accepts `(callback, void*)` or
+ * `(callback, void*, BOUNCE_CANCELLATION*)`, where `callback` is a
+ * single-shot `void (*)(void*, TCALLBACK_ARGS...)`.
+ * @param mapper Mapper invoked from the callback to convert payload arguments.
+ * @param cancellation Optional cancellation forwarded to @p start.
+ * @return Promise that resolves to @ref callback_promise_result once the
+ * callback fires or startup fails.
+ * @remarks The callback convention handled here requires the opaque state
+ * pointer as the first callback argument.
+ */
+inline promise<callback_promise_result<TResult>> make_callback_promise(
+  TBOUNCE_HANDLE &bounce_handle,
+  TSTART_FN&& start,
+  TMAPPER&& mapper,
+  BOUNCE_CANCELLATION *cancellation = nullptr) {
+  return detail::make_callback_promise_impl<
+    TResult,
+    TCALLBACK_ARGS...>(
+      bounce_handle,
+      std::forward<TSTART_FN>(start),
+      std::forward<TMAPPER>(mapper),
+      cancellation);
 }
 
 template<typename TBOUNCE_HANDLE>

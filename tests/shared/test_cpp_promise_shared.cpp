@@ -117,6 +117,19 @@ static void test_assert_completion_on_current_executor(
   ASSERT_TRUE(test_cpp_runtime_completion_ran_on_current_executor(context));
 }
 
+static void test_assert_completion_on_parker(
+  TEST_COMPLETION_CONTEXT *context,
+  TEST_PARK_THREAD_CONTEXT *park_context,
+  BOUNCE_COMPLETION_RESULT result) {
+  ASSERT_TRUE(test_cpp_runtime_completion_call_count(context) == 1u);
+  ASSERT_TRUE(test_cpp_runtime_completion_result(context) == result);
+  ASSERT_TRUE(test_cpp_runtime_completion_has_executor(context));
+  ASSERT_TRUE(
+    test_cpp_runtime_completion_ran_on_parker(
+      context,
+      park_context));
+}
+
 static void test_start_parker(
   libbounce::bounce *bounce_instance,
   TEST_PARK_THREAD_CONTEXT *context) {
@@ -287,6 +300,74 @@ static libbounce::promise<void> test_make_awaitable_aborted_coroutine(
     });
 
   ASSERT_TRUE(result.aborted());
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_make_callback_promise_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  const libbounce::callback_promise_result<int> result =
+    co_await libbounce::make_callback_promise<int, int, int>(
+      bounce_instance,
+      [&bounce_instance](
+        void (*completion)(void *, int, int),
+        void *completion_state,
+        BOUNCE_CANCELLATION * /*cancellation*/) noexcept -> bool {
+        return bounce_instance.post(
+          [completion, completion_state](BOUNCE_COMPLETION_RESULT post_result) noexcept {
+            ASSERT_TRUE(post_result == BOUNCE_COMPLETION_COMPLETED);
+            completion(completion_state, 19, 23);
+          });
+      },
+      [](int left, int right) noexcept -> int {
+        return left + right;
+      });
+
+  ASSERT_TRUE(result.completed());
+  ASSERT_TRUE(result.value.has_value());
+  ASSERT_TRUE(*result.value == 42);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_make_callback_promise_void_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  int mapped_value = 0;
+  const libbounce::callback_promise_result<void> result =
+    co_await libbounce::make_callback_promise<void, int>(
+      bounce_instance,
+      [](
+        void (*completion)(void *, int),
+        void *completion_state) noexcept {
+        completion(completion_state, 42);
+      },
+      [&mapped_value](int value) noexcept {
+        mapped_value = value;
+      });
+
+  ASSERT_TRUE(result.completed());
+  ASSERT_TRUE(mapped_value == 42);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_make_callback_promise_start_failed_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  const libbounce::callback_promise_result<int> result =
+    co_await libbounce::make_callback_promise<int, int>(
+      bounce_instance,
+      [](
+        void (* /*completion*/)(void *, int),
+        void * /*completion_state*/,
+        BOUNCE_CANCELLATION * /*cancellation*/) noexcept -> bool {
+        return false;
+      },
+      [](int value) noexcept -> int {
+        return value;
+      });
+
+  ASSERT_TRUE(result.start_failed());
+  ASSERT_TRUE(!result.value.has_value());
   test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
 }
 
@@ -526,6 +607,62 @@ extern "C" void test_cpp_promise_make_awaitable_aborted(void) {
   libbounce::bounce bounce_instance;
   TEST_COMPLETION_CONTEXT completion_context;
   auto coroutine = test_make_awaitable_aborted_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_on_current_executor(
+    &completion_context,
+    BOUNCE_COMPLETION_COMPLETED);
+}
+
+extern "C" void test_cpp_promise_make_callback_promise_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_make_callback_promise_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_make_callback_promise_void_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_make_callback_promise_void_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_make_callback_promise_start_failed(void) {
+  libbounce::bounce bounce_instance;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_make_callback_promise_start_failed_coroutine(
     bounce_instance,
     &completion_context);
 
