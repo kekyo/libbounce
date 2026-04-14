@@ -977,8 +977,6 @@ static void bounce_posix_glib_init_core(
           }
           if (r->io_uring_event_source == NULL) {
             g_source_unref(&io_source->source);
-          } else {
-            g_source_unref(&io_source->source);
           }
         }
       }
@@ -1520,7 +1518,6 @@ void bounce_deinit(BOUNCE_CORE *r) {
       item->completion_state,
       BOUNCE_COMPLETION_ABORTED);
   }
-
 #if defined(__linux__)
   if (r->io_uring_event_source != NULL) {
     g_source_destroy(r->io_uring_event_source);
