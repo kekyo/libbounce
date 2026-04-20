@@ -279,15 +279,6 @@ public:
   }
 
   /**
-   * @brief Publish this bounce reference as the current thread/task-local core.
-   * @remarks Passing an unbound reference clears the current attachment. This
-   * is equivalent to calling `bounce_set_core(get_core())`.
-   */
-  inline void set_default() const noexcept {
-    ::bounce_set_core(bounce_);
-  }
-
-  /**
    * @brief Post completion, will continue completion on the parked thread.
    * @param completion Completion callback entry point.
    * @param completion_state User provided completion callback state.
@@ -336,33 +327,6 @@ public:
   }
 
   /**
-   * @brief Park current thread and run continuation repeatedly.
-   * @return True when succeeded continuation pumps.
-   * @remarks The thread will block inside. Release when `shutdown()` called.
-   * Call `set_default()` first when callbacks or coroutine helpers on this
-   * thread need `get_current()`.
-   */
-  inline bool park() noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park(bounce_, 0u) :
-             false;
-  }
-
-  /**
-   * @brief Park current thread and run continuation repeatedly with inline nesting control.
-   * @param max_inline_depth Maximum number of inline nested completion executions.
-   * @return True when succeeded continuation pumps.
-   * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. Call `set_default()` first when
-   * callbacks or coroutine helpers on this thread need `get_current()`.
-   */
-  inline bool park(unsigned int max_inline_depth) noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park(bounce_, max_inline_depth) :
-             false;
-  }
-
-  /**
    * @brief Shutdown parking threads.
    * @param wait_for_idle When true, keep parking until already-pending wait
    * operations settle. Defaults to true.
@@ -396,20 +360,20 @@ public:
   }
 
   /**
-   * @brief Publish this bounce as the current thread/task-local core.
-   * @remarks This is equivalent to calling `bounce_set_core(get_core())`.
-   */
-  inline void set_default() noexcept {
-    ::bounce_set_core(&bounce_);
-  }
-
-  /**
    * @brief Get the current thread/task-local or fallback bounce core pointer.
    * @return Backend bounce core pointer, or `NULL` when neither a current
    * attachment nor a fallback core is available.
    */
   static inline TBOUNCE_CORE *get_current_core() noexcept {
     return static_cast<TBOUNCE_CORE *>(::bounce_get_core());
+  }
+
+  /**
+   * @brief Publish this bounce as the current thread/task-local core.
+   * @remarks This is equivalent to calling `bounce_set_core(get_core())`.
+   */
+  inline void set_default() noexcept {
+    ::bounce_set_core(&bounce_);
   }
 
   /**

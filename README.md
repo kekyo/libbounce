@@ -695,6 +695,13 @@ Use the C++ helpers from each backend's public header.
 The shared thin RAII wrappers use the same names on every backend, and only
 backend-specific wait targets are added where needed.
 
+`libbounce::bounce` is a class that owns `BOUNCE_CORE`, but typically, after creating this instance, you register it with TLS using `set_default()`.
+This allows you to easily access this instance within a continuation function using `static libbounce::bounce::get_current()`.
+Since continuation functions are always called on a parking thread, the instance is always accessible via `get_current()`.
+
+Exposing a `libbounce::bounce` instance globally is only necessary when you explicitly want to use a specific parking thread,
+so there is generally no reason to implement it that way.
+
 The common types are as follows.
 
 |Type / Method|Role|
