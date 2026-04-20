@@ -398,25 +398,8 @@ extern "C" void test_cpp_wrapper_post_runs(void) {
   test_stop_parker(&bounce_instance, &park_context);
 }
 
-extern "C" void test_cpp_wrapper_park_once_post_runs(void) {
-  libbounce::bounce bounce_instance;
-  TEST_COMPLETION_CONTEXT completion_context;
-
-  ::bounce_set_fallback_core(NULL);
-  ::bounce_set_core(NULL);
-  test_completion_context_init(&completion_context);
-  ASSERT_TRUE(
-    bounce_instance.post(
-      [&bounce_instance, &completion_context](BOUNCE_COMPLETION_RESULT result) {
-        test_assert_current_without_set_default(&bounce_instance);
-        test_record_completion(&completion_context, result);
-      }));
-  ASSERT_TRUE(bounce_instance.park_once());
-  ASSERT_TRUE(!libbounce::bounce::get_current());
-  test_assert_completion_on_current_executor(
-    &completion_context,
-    BOUNCE_COMPLETION_COMPLETED);
-}
+// For testing purpose.
+extern "C" bool bounce_dangerous_unsafe_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth);
 
 extern "C" void test_cpp_wrapper_set_default_timeout_await_runs(void) {
   libbounce::bounce bounce_instance;
@@ -450,7 +433,7 @@ extern "C" void test_cpp_wrapper_set_default_timeout_await_runs(void) {
     while (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
       ASSERT_TRUE(libbounce::bounce::get_current());
       ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
-      ASSERT_TRUE(bounce_instance.park_once());
+      ASSERT_TRUE(::bounce_dangerous_unsafe_park_once(bounce_instance.get_core(), 0u));
       ASSERT_TRUE(libbounce::bounce::get_current());
       ASSERT_TRUE(libbounce::bounce::get_current().get_core() == bounce_instance.get_core());
       ASSERT_TRUE((test_cpp_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
@@ -496,7 +479,7 @@ extern "C" void test_cpp_wrapper_set_default_overrides_fallback_view(void) {
         ASSERT_TRUE(current.get_core() == bounce_instance.get_core());
         test_record_completion(&completion_context, result);
       }));
-  ASSERT_TRUE(bounce_instance.park_once());
+  ASSERT_TRUE(::bounce_dangerous_unsafe_park_once(bounce_instance.get_core(), 0u));
   test_assert_completion_on_current_executor(
     &completion_context,
     BOUNCE_COMPLETION_COMPLETED);
@@ -512,120 +495,6 @@ extern "C" void test_cpp_wrapper_set_default_overrides_fallback_view(void) {
   ASSERT_TRUE(libbounce::bounce::get_current().get_core() == fallback_after.get_core());
   ::bounce_set_fallback_core(NULL);
   ASSERT_TRUE(!libbounce::bounce::get_current());
-}
-
-extern "C" void test_cpp_wrapper_park_once_returns_before_timeout_completion(void) {
-  libbounce::bounce bounce_instance;
-  TEST_COMPLETION_CONTEXT completion_context;
-
-  test_completion_context_init(&completion_context);
-  {
-    libbounce::timer timer;
-    double started_ms;
-    double first_return_ms;
-
-    ASSERT_TRUE(
-      timer.wait(
-        bounce_instance,
-        200u,
-        test_cpp_completion_callback,
-        &completion_context,
-        NULL));
-    started_ms = test_cpp_monotonic_now_ms();
-    ASSERT_TRUE(bounce_instance.park_once());
-    first_return_ms = test_cpp_monotonic_now_ms();
-
-    ASSERT_TRUE((first_return_ms - started_ms) < 100.0);
-    ASSERT_TRUE(test_cpp_runtime_completion_call_count(&completion_context) == 0u);
-
-    while (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
-      ASSERT_TRUE(bounce_instance.park_once());
-      ASSERT_TRUE((test_cpp_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
-      if (test_cpp_runtime_completion_call_count(&completion_context) == 0u) {
-        test_cpp_yield_park_once_poll();
-      }
-    }
-
-    test_assert_completion_on_current_executor(
-      &completion_context,
-      BOUNCE_COMPLETION_COMPLETED);
-  }
-}
-
-extern "C" void test_cpp_wrapper_park_once_nested_post_inlines(void) {
-  libbounce::bounce bounce_instance;
-  TEST_CPP_INLINE_POST_CONTEXT context{};
-
-  context.bounce = &bounce_instance;
-  test_completion_context_init(&context.outer);
-  test_completion_context_init(&context.nested);
-
-  ASSERT_TRUE(
-    bounce_instance.post(
-      [&context](BOUNCE_COMPLETION_RESULT result) {
-        ASSERT_TRUE(
-          context.bounce->post(
-            [&context](BOUNCE_COMPLETION_RESULT nested_result) {
-              __atomic_store_n(
-                &context.nested_order,
-                test_cpp_inline_post_next_order(&context.next_order),
-                __ATOMIC_RELEASE);
-              test_record_completion(&context.nested, nested_result);
-            }));
-        __atomic_store_n(
-          &context.outer_order,
-          test_cpp_inline_post_next_order(&context.next_order),
-          __ATOMIC_RELEASE);
-        test_record_completion(&context.outer, result);
-      }));
-  ASSERT_TRUE(bounce_instance.park_once(2u));
-
-  test_assert_completion_on_current_executor(
-    &context.outer,
-    BOUNCE_COMPLETION_COMPLETED);
-  test_assert_completion_on_current_executor(
-    &context.nested,
-    BOUNCE_COMPLETION_COMPLETED);
-  ASSERT_TRUE(__atomic_load_n(&context.nested_order, __ATOMIC_ACQUIRE) == 1u);
-  ASSERT_TRUE(__atomic_load_n(&context.outer_order, __ATOMIC_ACQUIRE) == 2u);
-}
-
-extern "C" void test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit(void) {
-  libbounce::bounce bounce_instance;
-  TEST_CPP_INLINE_POST_CONTEXT context{};
-
-  context.bounce = &bounce_instance;
-  test_completion_context_init(&context.outer);
-  test_completion_context_init(&context.nested);
-
-  ASSERT_TRUE(
-    bounce_instance.post(
-      [&context](BOUNCE_COMPLETION_RESULT result) {
-        ASSERT_TRUE(
-          context.bounce->post(
-            [&context](BOUNCE_COMPLETION_RESULT nested_result) {
-              __atomic_store_n(
-                &context.nested_order,
-                test_cpp_inline_post_next_order(&context.next_order),
-                __ATOMIC_RELEASE);
-              test_record_completion(&context.nested, nested_result);
-            }));
-        __atomic_store_n(
-          &context.outer_order,
-          test_cpp_inline_post_next_order(&context.next_order),
-          __ATOMIC_RELEASE);
-        test_record_completion(&context.outer, result);
-      }));
-  ASSERT_TRUE(bounce_instance.park_once(1u));
-
-  test_assert_completion_on_current_executor(
-    &context.outer,
-    BOUNCE_COMPLETION_COMPLETED);
-  test_assert_completion_on_current_executor(
-    &context.nested,
-    BOUNCE_COMPLETION_COMPLETED);
-  ASSERT_TRUE(__atomic_load_n(&context.outer_order, __ATOMIC_ACQUIRE) == 1u);
-  ASSERT_TRUE(__atomic_load_n(&context.nested_order, __ATOMIC_ACQUIRE) == 2u);
 }
 
 extern "C" void test_cpp_wrapper_nested_post_inlines_with_park_ex(void) {

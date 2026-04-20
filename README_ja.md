@@ -475,7 +475,7 @@ static libbounce::promise<void> session(
 主な型は次の通りです。
 
 - `libbounce::bounce`:
-  `BOUNCE_CORE` の所有クラスです。`post()`, `park()`, `park_once()`, `shutdown()` を持ちます。
+  `BOUNCE_CORE` の所有クラスです。`post()`, `park()`, `shutdown()`, `set_default()`, `get_current()` を持ちます。
 - `libbounce::timer`:
   `BOUNCE_TIMER` のRAIIラッパーです。`timer.wait(...)` でタイマー待機を登録します。
 - `libbounce::cancellation`:
@@ -526,7 +526,7 @@ parker.join();
 
 また、現在スレッド/タスクで
 `libbounce::bounce::get_current()` から非所有の `bounce_ref` を取得したい場合は、
-`park()` / `park_once()` の前に明示的に `set_default()` を呼びます。
+`park()` の前に明示的に `set_default()` を呼びます。
 
 ```cpp
 /* bounce core を所有する */
@@ -545,7 +545,7 @@ bounce.set_default();
     });
   }
 });
-(void)bounce.park_once();
+(void)bounce.park();
 ```
 
 ライブラリ内部やコールバックチェインの中で「明示的に参照を渡したくないが、現在の bounce は取得したい」という場面で役に立ちます。
@@ -563,7 +563,6 @@ bounce.set_default();
 |`bounce_init()` / `bounce_deinit()`|core の初期化と破棄|
 |`bounce_post()`|継続処理を ready queue に積み、parker 上で実行させる|
 |`bounce_park()`|現在スレッド/タスクを parker として待機させる|
-|`bounce_park_once()`|現在 dispatch 可能な継続だけを1回処理して戻る|
 |`bounce_shutdown()`|すべての parker に停止要求を出す。必要なら pending wait 消化後に抜ける|
 |`bounce_set_core()` / `bounce_get_core()` / `bounce_set_fallback_core()`|現在スレッド/タスクに対応する core を公開・取得し、必要ならプロセス共通フォールバックも使う|
 |`bounce_cancellation_*()`|キャンセルソースの初期化・発行・破棄|
@@ -578,34 +577,6 @@ bounce.set_default();
   キャンセルによって完了しました。
 - `BOUNCE_COMPLETION_ABORTED`:
   シャットダウンや破棄、バックエンド失敗などで継続できませんでした。
-
-`bounce_park_once()` は、自前のイベントループやメインループを持つホスト側に組み込みたい時に便利です。
-
-```c
-/* bounce core を用意する */
-BOUNCE_CORE bounce;
-/* タイマー待機用オブジェクトを用意する */
-BOUNCE_TIMER timer;
-
-/* core と timer を初期化する */
-bounce_init(&bounce);
-bounce_timer_init(&timer);
-
-/* 100msec 後に on_completed() を呼ぶタイマーを登録する */
-(void)bounce_await_timeout(&bounce, &timer, 100u, on_completed, NULL, NULL);
-
-/* 自前ループの中で dispatch 可能な継続だけを1回ずつ処理する */
-while (!done) {
-  /* ready な継続があれば現在スレッドで実行する */
-  (void)bounce_park_once(&bounce, 0u);
-  /* ホスト側のポーリングやフレーム更新を続ける */
-}
-
-/* 待機オブジェクトを先に破棄する */
-bounce_timer_deinit(&timer);
-/* 最後に core を破棄する */
-bounce_deinit(&bounce);
-```
 
 注意点として、pending な継続や登録が残ったまま `bounce_deinit()` されると、
 それらは `BOUNCE_COMPLETION_ABORTED` として解決される場合があります。
@@ -659,9 +630,9 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 
 |型/メソッド|役割|
 |:----|:----|
-|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `set_default()`, `park()`, `park_once()`, `shutdown()` を持つ|
+|`libbounce::bounce`|`BOUNCE_CORE` の所有クラス。`post()`, `set_default()`, `park()`, `shutdown()`, `get_current()`, `set_default()` を持つ|
 |`libbounce::bounce::get_current()`|現在スレッド/タスクにアタッチ済みの core、または設定済みフォールバック core を `bounce_ref` として取得する|
-|`libbounce::bounce_base_ref`|共通の非所有参照。既にどこかで管理している core に対して `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()` などを行う|
+|`libbounce::bounce_base_ref`|共通の非所有参照。既にどこかで管理している core に対して `get_core()`, `post()`, `shutdown()` などを行う|
 |`libbounce::bounce_ref`|backend 固有の非所有参照。`bounce_base_ref` を拡張し、必要なら backend 固有 helper を持つ|
 |`libbounce::timer`|`BOUNCE_TIMER` の RAII ラッパー。`wait(bounce, duration_msec, ...)` でタイマー待機を登録する|
 |`libbounce::cancellation`|`BOUNCE_CANCELLATION` の RAII ラッパー。`cancel(bounce)` でキャンセルを発行する|
@@ -836,8 +807,7 @@ bounce_init_with_main_context(&bounce, g_main_context_default());
 
 callback や helper から C API の `bounce_get_core()` が必要なら、
 `bounce_park()` へ入る前に `bounce_set_core()` で current core を公開してください。
-C++ API では、現在スレッド/タスクで `get_current()` を使いたい場合に
-`bounce.park()` / `bounce.park_once()` の前で `bounce.set_default()` を呼びます。
+C++ API では、現在スレッド/タスクで `get_current()` を使いたい場合に `bounce.park()` の前で `bounce.set_default()` を呼びます。
 
 ---
 

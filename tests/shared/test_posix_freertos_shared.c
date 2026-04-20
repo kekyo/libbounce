@@ -32,12 +32,8 @@ extern void test_cpp_wrapper_registration_lambda_completes_canceled(void);
 extern void test_cpp_wrapper_registration_unregister_prevents_callback(void);
 extern void test_cpp_wrapper_registration_precanceled_completes_canceled(void);
 extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void);
-extern void test_cpp_wrapper_park_once_post_runs(void);
 extern void test_cpp_wrapper_set_default_timeout_await_runs(void);
 extern void test_cpp_wrapper_set_default_overrides_fallback_view(void);
-extern void test_cpp_wrapper_park_once_returns_before_timeout_completion(void);
-extern void test_cpp_wrapper_park_once_nested_post_inlines(void);
-extern void test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit(void);
 extern void test_cpp_wrapper_nested_post_inlines_with_park_ex(void);
 extern void test_cpp_wrapper_current_post_runs_on_defaulted_parker(void);
 extern void test_cpp_wrapper_nested_post_falls_back_at_depth_limit(void);
@@ -327,6 +323,9 @@ static void test_yield_park_once_poll(void) {
 #endif
 }
 
+// For testing purpose.
+extern bool bounce_dangerous_unsafe_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth);
+
 static void test_poll_park_once_until_completion(
   BOUNCE_CORE *bounce,
   TEST_COMPLETION_CONTEXT *context,
@@ -335,7 +334,7 @@ static void test_poll_park_once_until_completion(
   const double started_ms = test_monotonic_now_ms();
 
   while (test_completion_call_count(context) < expected_call_count) {
-    ASSERT_TRUE(bounce_park_once(bounce, max_inline_depth));
+    ASSERT_TRUE(bounce_dangerous_unsafe_park_once(bounce, max_inline_depth));
     ASSERT_TRUE((test_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
     if (test_completion_call_count(context) < expected_call_count) {
       test_yield_park_once_poll();
@@ -641,7 +640,7 @@ static void test_park_once_post_runs(void) {
   test_completion_context_init(&completion_context, true, NULL);
 
   ASSERT_TRUE(bounce_post(&bounce, test_completion_callback, &completion_context));
-  ASSERT_TRUE(bounce_park_once(&bounce, 0u));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 0u));
   test_assert_completion_on_current_executor(
     &completion_context,
     BOUNCE_COMPLETION_COMPLETED);
@@ -669,7 +668,7 @@ static void test_park_once_returns_before_timeout_completion(void) {
     &completion_context,
     NULL));
   started_ms = test_monotonic_now_ms();
-  ASSERT_TRUE(bounce_park_once(&bounce, 0u));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 0u));
   first_return_ms = test_monotonic_now_ms();
 
   ASSERT_TRUE((first_return_ms - started_ms) < 100.0);
@@ -696,7 +695,7 @@ static void test_park_once_nested_post_inlines(void) {
   test_completion_context_init(&context.nested, true, &context.next_order);
 
   ASSERT_TRUE(bounce_post(&bounce, test_nested_post_outer_completion, &context));
-  ASSERT_TRUE(bounce_park_once(&bounce, 2u));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 2u));
 
   test_assert_completion_on_current_executor(
     &context.outer,
@@ -723,7 +722,7 @@ static void test_park_once_nested_post_falls_back_at_depth_limit(void) {
   test_completion_context_init(&context.nested, true, &context.next_order);
 
   ASSERT_TRUE(bounce_post(&bounce, test_nested_post_outer_completion, &context));
-  ASSERT_TRUE(bounce_park_once(&bounce, 1u));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 1u));
 
   test_assert_completion_on_current_executor(
     &context.outer,
@@ -2003,12 +2002,8 @@ int test_run_posix_freertos_shared_suite(
   TEST_APPEND_CASE(test_cpp_wrapper_post_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_post_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_post_aborts_on_deinit);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_post_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_set_default_timeout_await_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_set_default_overrides_fallback_view);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_returns_before_timeout_completion);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_nested_post_inlines);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit);
   TEST_APPEND_CASE(test_cpp_wrapper_nested_post_inlines_with_park_ex);
   TEST_APPEND_CASE(test_cpp_wrapper_current_post_runs_on_defaulted_parker);
   TEST_APPEND_CASE(test_cpp_wrapper_nested_post_falls_back_at_depth_limit);

@@ -528,7 +528,7 @@ The main types are as follows.
 
 - `libbounce::bounce`:
   The owning class for `BOUNCE_CORE`.
-  It exposes `post()`, `park()`, `park_once()`, and `shutdown()`.
+  It exposes `post()`, `park()`, `shutdown()`, `set_default()` and `get_current()`.
 - `libbounce::timer`:
   An RAII wrapper for `BOUNCE_TIMER`.
   Register timer waits with `timer.wait(...)`.
@@ -581,8 +581,8 @@ parker.join();
 ```
 
 Also, when you want `libbounce::bounce::get_current()` to resolve to a
-backend-specific non-owning `bounce_ref` on the current thread or task, call
-`set_default()` explicitly before `park()` or `park_once()`.
+backend-specific non-owning `bounce_ref` on the current thread or task,
+call `set_default()` explicitly before `park()`.
 
 ```cpp
 /* Own the bounce core */
@@ -601,7 +601,7 @@ bounce.set_default();
     });
   }
 });
-(void)bounce.park_once();
+(void)bounce.park();
 ```
 
 This is useful inside library internals or callback chains when you do not want
@@ -621,7 +621,6 @@ backend.
 |`bounce_init()` / `bounce_deinit()`|Initialize and destroy the core|
 |`bounce_post()`|Push a continuation onto the ready queue so it runs on a parker|
 |`bounce_park()`|Park the current thread or task as a parker|
-|`bounce_park_once()`|Run only the continuations that are dispatchable right now, once, then return|
 |`bounce_shutdown()`|Request all parkers to stop, optionally after pending waits settle|
 |`bounce_set_core()` / `bounce_get_core()` / `bounce_set_fallback_core()`|Publish and read the core for the current thread or task, with an optional process-wide fallback|
 |`bounce_cancellation_*()`|Initialize, issue, and destroy a cancellation source|
@@ -637,35 +636,6 @@ backend.
 - `BOUNCE_COMPLETION_ABORTED`:
   The continuation could not complete because of shutdown, destruction, backend
   failure, or a similar reason.
-
-`bounce_park_once()` is useful when integrating into a host that already has
-its own event loop or main loop.
-
-```c
-/* Prepare the bounce core */
-BOUNCE_CORE bounce;
-/* Prepare an object for timer waits */
-BOUNCE_TIMER timer;
-
-/* Initialize the core and timer */
-bounce_init(&bounce);
-bounce_timer_init(&timer);
-
-/* Register a timer that calls on_completed() after 100 ms */
-(void)bounce_await_timeout(&bounce, &timer, 100u, on_completed, NULL, NULL);
-
-/* In a custom loop, run only continuations that are dispatchable right now */
-while (!done) {
-  /* Run a ready continuation on the current thread if one exists */
-  (void)bounce_park_once(&bounce, 0u);
-  /* Keep doing host-side polling or frame updates */
-}
-
-/* Destroy wait objects first */
-bounce_timer_deinit(&timer);
-/* Destroy the core last */
-bounce_deinit(&bounce);
-```
 
 One thing to note is that if `bounce_deinit()` runs while pending continuations
 or registrations still remain, they may be resolved as
@@ -729,9 +699,9 @@ The common types are as follows.
 
 |Type / Method|Role|
 |:----|:----|
-|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `set_default()`, `park()`, `park_once()`, and `shutdown()`|
+|`libbounce::bounce`|Owning class for `BOUNCE_CORE`. Exposes `post()`, `park()`, `shutdown()`, `get_current()` and `set_default()`|
 |`libbounce::bounce::get_current()`|Returns the core currently attached to the thread or task, or the configured fallback core, as `bounce_ref`|
-|`libbounce::bounce_base_ref`|Common non-owning reference. Lets you call `get_core()`, `post()`, `park()`, `park_once()`, `shutdown()`, and similar operations on a core managed elsewhere|
+|`libbounce::bounce_base_ref`|Common non-owning reference. Lets you call `get_core()`, `post()`, `shutdown()`, and similar operations on a core managed elsewhere|
 |`libbounce::bounce_ref`|Backend-specific non-owning reference. Extends `bounce_base_ref` with backend-local helper methods where available|
 |`libbounce::timer`|RAII wrapper for `BOUNCE_TIMER`. Registers timer waits with `wait(bounce, duration_msec, ...)`|
 |`libbounce::cancellation`|RAII wrapper for `BOUNCE_CANCELLATION`. Issues cancellation with `cancel(bounce)`|
@@ -913,8 +883,7 @@ bounce_init_with_main_context(&bounce, g_main_context_default());
 
 If callbacks or helpers need `bounce_get_core()` in the C API, call
 `bounce_set_core()` before entering `bounce_park()`. In the C++ API, call
-`bounce.set_default()` before `bounce.park()` or `bounce.park_once()` when the
-current thread or task needs `get_current()`.
+`bounce.set_default()` before `bounce.park()` when the current thread or task needs `get_current()`.
 
 ---
 

@@ -279,8 +279,15 @@ bool bounce_park(BOUNCE_CORE *r, unsigned int max_inline_depth) {
  * @param r Initialized BOUNCE_CORE.
  * @param max_inline_depth Maximum number of inline nested completion executions.
  * @return True when succeeded continuation pumps.
+ * @remarks This executes completion work that is already immediately
+ * dispatchable and then returns without blocking for future work. A zero value
+ * disables inline nested execution and preserves the traditional
+ * ready-queue-only behavior.
+ * WARNING: `bounce_dangerous_unsafe_park_once()` is a HIGHLY INTERNAL function,
+ * and there is almost NO legitimate reason to call it from outside.
+ * You should almost always use `bounce_park()` instead.
  */
-bool bounce_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth) {
+bool bounce_dangerous_unsafe_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth) {
   if (r == NULL) {
     return false;
   }

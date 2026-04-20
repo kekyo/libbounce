@@ -29,12 +29,8 @@ extern void test_cpp_wrapper_registration_lambda_completes_canceled(void);
 extern void test_cpp_wrapper_registration_unregister_prevents_callback(void);
 extern void test_cpp_wrapper_registration_precanceled_completes_canceled(void);
 extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive(void);
-extern void test_cpp_wrapper_park_once_post_runs(void);
 extern void test_cpp_wrapper_set_default_timeout_await_runs(void);
 extern void test_cpp_wrapper_set_default_overrides_fallback_view(void);
-extern void test_cpp_wrapper_park_once_returns_before_timeout_completion(void);
-extern void test_cpp_wrapper_park_once_nested_post_inlines(void);
-extern void test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit(void);
 extern void test_cpp_wrapper_nested_post_inlines_with_park_ex(void);
 extern void test_cpp_wrapper_current_post_runs_on_defaulted_parker(void);
 extern void test_cpp_wrapper_nested_post_falls_back_at_depth_limit(void);
@@ -79,8 +75,10 @@ typedef struct TEST_COMPLETION_CONTEXT {
   pthread_mutex_t mutex;
   pthread_cond_t cond;
   unsigned int call_count;
+  unsigned int order;
   int result;
   pthread_t callback_thread;
+  volatile unsigned int *next_order;
   bool callback_thread_set;
   BOUNCE_CORE *observed_bounce;
 } TEST_COMPLETION_CONTEXT;
@@ -98,6 +96,13 @@ typedef struct TEST_STRESS_PRODUCER_CONTEXT {
   TEST_STRESS_CONTEXT *stress;
   unsigned int remaining_posts;
 } TEST_STRESS_PRODUCER_CONTEXT;
+
+typedef struct TEST_INLINE_POST_CONTEXT {
+  BOUNCE_CORE *bounce;
+  TEST_COMPLETION_CONTEXT outer;
+  TEST_COMPLETION_CONTEXT nested;
+  volatile unsigned int next_order;
+} TEST_INLINE_POST_CONTEXT;
 
 typedef struct TEST_GENERIC_TIMEOUT_HANDLE {
   pthread_mutex_t mutex;
@@ -251,6 +256,23 @@ static struct timespec test_deadline_after_ms(unsigned int timeout_ms) {
   return timeout;
 }
 
+static double test_monotonic_now_ms(void) {
+  struct timespec now;
+
+  ASSERT_TRUE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+  return ((double)now.tv_sec * 1000.0) + ((double)now.tv_nsec / 1000000.0);
+}
+
+static void test_yield_park_once_poll(void) {
+  struct timespec delay;
+
+  delay.tv_sec = 0;
+  delay.tv_nsec = 1000000L;
+  while (nanosleep(&delay, &delay) != 0) {
+    ASSERT_TRUE(errno == EINTR);
+  }
+}
+
 static void test_completion_callback(
   BOUNCE_COMPLETION_RESULT result,
   void *completion_state) {
@@ -258,6 +280,10 @@ static void test_completion_callback(
 
   ASSERT_TRUE(pthread_mutex_lock(&context->mutex) == 0);
   context->call_count += 1u;
+  if (context->next_order != NULL) {
+    context->order =
+      __atomic_add_fetch(context->next_order, 1u, __ATOMIC_ACQ_REL);
+  }
   context->result = (int)result;
   context->callback_thread = pthread_self();
   context->callback_thread_set = true;
@@ -273,9 +299,25 @@ static void test_completion_context_init(TEST_COMPLETION_CONTEXT *context) {
   context->result = -1;
 }
 
+static void test_completion_context_init_ordered(
+  TEST_COMPLETION_CONTEXT *context,
+  volatile unsigned int *next_order) {
+  test_completion_context_init(context);
+  context->next_order = next_order;
+}
+
 static void test_completion_context_destroy(TEST_COMPLETION_CONTEXT *context) {
   ASSERT_TRUE(pthread_cond_destroy(&context->cond) == 0);
   ASSERT_TRUE(pthread_mutex_destroy(&context->mutex) == 0);
+}
+
+static unsigned int test_completion_call_count(TEST_COMPLETION_CONTEXT *context) {
+  unsigned int call_count;
+
+  ASSERT_TRUE(pthread_mutex_lock(&context->mutex) == 0);
+  call_count = context->call_count;
+  ASSERT_TRUE(pthread_mutex_unlock(&context->mutex) == 0);
+  return call_count;
 }
 
 static void test_wait_completion_count(
@@ -299,6 +341,36 @@ static void test_assert_completion(
   ASSERT_TRUE(context->call_count == 1u);
   ASSERT_TRUE(context->result == (int)result);
   ASSERT_TRUE(context->callback_thread_set);
+}
+
+static unsigned int test_completion_order(const TEST_COMPLETION_CONTEXT *context) {
+  return context->order;
+}
+
+static void test_assert_completion_on_current_thread(
+  const TEST_COMPLETION_CONTEXT *context,
+  BOUNCE_COMPLETION_RESULT result) {
+  test_assert_completion(context, result);
+  ASSERT_TRUE(pthread_equal(context->callback_thread, pthread_self()));
+}
+
+// For testing purpose.
+extern bool bounce_dangerous_unsafe_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth);
+
+static void test_poll_park_once_until_completion(
+  BOUNCE_CORE *bounce,
+  TEST_COMPLETION_CONTEXT *completion,
+  unsigned int max_inline_depth,
+  unsigned int expected_call_count) {
+  double started_ms = test_monotonic_now_ms();
+
+  while (test_completion_call_count(completion) < expected_call_count) {
+    ASSERT_TRUE(bounce_dangerous_unsafe_park_once(bounce, max_inline_depth));
+    ASSERT_TRUE((test_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
+    if (test_completion_call_count(completion) < expected_call_count) {
+      test_yield_park_once_poll();
+    }
+  }
 }
 
 static void test_park_context_init(
@@ -334,6 +406,21 @@ static void *test_park_thread(void *parameter) {
 
   bounce_set_core(previous_core);
   return NULL;
+}
+
+static void test_nested_post_inner_completion(
+  BOUNCE_COMPLETION_RESULT result,
+  void *completion_state) {
+  test_completion_callback(result, completion_state);
+}
+
+static void test_nested_post_outer_completion(
+  BOUNCE_COMPLETION_RESULT result,
+  void *completion_state) {
+  TEST_INLINE_POST_CONTEXT *context = completion_state;
+
+  ASSERT_TRUE(bounce_post(context->bounce, test_nested_post_inner_completion, &context->nested));
+  test_completion_callback(result, &context->outer);
 }
 
 static void test_start_parker(
@@ -433,6 +520,113 @@ static void test_single_post_runs(void) {
   test_stop_parker(&park_context);
   test_park_context_destroy(&park_context);
   test_completion_context_destroy(&completion);
+  bounce_deinit(&bounce);
+}
+
+static void test_park_once_post_runs(void) {
+  BOUNCE_CORE bounce;
+  TEST_COMPLETION_CONTEXT completion;
+
+  bounce_init(&bounce);
+  test_completion_context_init(&completion);
+
+  ASSERT_TRUE(bounce_post(&bounce, test_completion_callback, &completion));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 0u));
+  test_assert_completion_on_current_thread(
+    &completion,
+    BOUNCE_COMPLETION_COMPLETED);
+
+  test_completion_context_destroy(&completion);
+  bounce_deinit(&bounce);
+}
+
+static void test_park_once_returns_before_timeout_completion(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_TIMER timer;
+  TEST_COMPLETION_CONTEXT completion;
+  double started_ms;
+  double first_return_ms;
+
+  bounce_init(&bounce);
+  bounce_timer_init(&timer);
+  test_completion_context_init(&completion);
+
+  ASSERT_TRUE(
+    bounce_await_timeout(
+      &bounce,
+      &timer,
+      200u,
+      test_completion_callback,
+      &completion,
+      NULL));
+  started_ms = test_monotonic_now_ms();
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 0u));
+  first_return_ms = test_monotonic_now_ms();
+
+  ASSERT_TRUE((first_return_ms - started_ms) < 100.0);
+  ASSERT_TRUE(test_completion_call_count(&completion) == 0u);
+
+  test_poll_park_once_until_completion(&bounce, &completion, 0u, 1u);
+  test_assert_completion_on_current_thread(
+    &completion,
+    BOUNCE_COMPLETION_COMPLETED);
+
+  test_completion_context_destroy(&completion);
+  bounce_timer_deinit(&timer);
+  bounce_deinit(&bounce);
+}
+
+static void test_park_once_nested_post_inlines(void) {
+  BOUNCE_CORE bounce;
+  TEST_INLINE_POST_CONTEXT context;
+
+  memset(&context, 0, sizeof context);
+  bounce_init(&bounce);
+  context.bounce = &bounce;
+  test_completion_context_init_ordered(&context.outer, &context.next_order);
+  test_completion_context_init_ordered(&context.nested, &context.next_order);
+
+  ASSERT_TRUE(bounce_post(&bounce, test_nested_post_outer_completion, &context));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 2u));
+
+  test_assert_completion_on_current_thread(
+    &context.outer,
+    BOUNCE_COMPLETION_COMPLETED);
+  test_assert_completion_on_current_thread(
+    &context.nested,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(test_completion_order(&context.nested) == 1u);
+  ASSERT_TRUE(test_completion_order(&context.outer) == 2u);
+
+  test_completion_context_destroy(&context.nested);
+  test_completion_context_destroy(&context.outer);
+  bounce_deinit(&bounce);
+}
+
+static void test_park_once_nested_post_falls_back_at_depth_limit(void) {
+  BOUNCE_CORE bounce;
+  TEST_INLINE_POST_CONTEXT context;
+
+  memset(&context, 0, sizeof context);
+  bounce_init(&bounce);
+  context.bounce = &bounce;
+  test_completion_context_init_ordered(&context.outer, &context.next_order);
+  test_completion_context_init_ordered(&context.nested, &context.next_order);
+
+  ASSERT_TRUE(bounce_post(&bounce, test_nested_post_outer_completion, &context));
+  ASSERT_TRUE(bounce_dangerous_unsafe_park_once(&bounce, 1u));
+
+  test_assert_completion_on_current_thread(
+    &context.outer,
+    BOUNCE_COMPLETION_COMPLETED);
+  test_assert_completion_on_current_thread(
+    &context.nested,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(test_completion_order(&context.outer) == 1u);
+  ASSERT_TRUE(test_completion_order(&context.nested) == 2u);
+
+  test_completion_context_destroy(&context.nested);
+  test_completion_context_destroy(&context.outer);
   bounce_deinit(&bounce);
 }
 
@@ -547,7 +741,7 @@ static void test_second_parker_rejected(void) {
   test_wait_completion_count(&completion, 1u);
   test_assert_completion(&completion, BOUNCE_COMPLETION_COMPLETED);
 
-  ASSERT_TRUE(!bounce_park_once(&bounce, 0u));
+  ASSERT_TRUE(!bounce_dangerous_unsafe_park_once(&bounce, 0u));
 
   test_stop_parker(&park_context);
   test_park_context_destroy(&park_context);
@@ -664,6 +858,10 @@ int main(void) {
   TEST_APPEND_CASE(test_tls_current_core_uses_fallback_when_unattached);
   TEST_APPEND_CASE(test_tls_current_core_visible_on_attached_parker);
   TEST_APPEND_CASE(test_single_post_runs);
+  TEST_APPEND_CASE(test_park_once_post_runs);
+  TEST_APPEND_CASE(test_park_once_returns_before_timeout_completion);
+  TEST_APPEND_CASE(test_park_once_nested_post_inlines);
+  TEST_APPEND_CASE(test_park_once_nested_post_falls_back_at_depth_limit);
   TEST_APPEND_CASE(test_single_timeout_runs);
   TEST_APPEND_CASE(test_timeout_cancel_completes_canceled);
   TEST_APPEND_CASE(test_registration_completes_canceled);
@@ -672,12 +870,8 @@ int main(void) {
   TEST_APPEND_CASE(test_cpp_wrapper_post_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_post_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_post_aborts_on_deinit);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_post_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_set_default_timeout_await_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_set_default_overrides_fallback_view);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_returns_before_timeout_completion);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_nested_post_inlines);
-  TEST_APPEND_CASE(test_cpp_wrapper_park_once_nested_post_falls_back_at_depth_limit);
   TEST_APPEND_CASE(test_cpp_wrapper_nested_post_inlines_with_park_ex);
   TEST_APPEND_CASE(test_cpp_wrapper_current_post_runs_on_defaulted_parker);
   TEST_APPEND_CASE(test_cpp_wrapper_nested_post_falls_back_at_depth_limit);

@@ -109,7 +109,7 @@ extern void bounce_shutdown(BOUNCE_CORE *r, bool wait_for_idle);
 extern void bounce_deinit(BOUNCE_CORE *r);
 
 /**
- * @brief Pump current thread once without waiting for new completion work.
+ * @brief DANGEROUS UNSAFE: Pump current thread once without waiting for new completion work.
  * @param r Initialized BOUNCE_CORE.
  * @param max_inline_depth Maximum number of inline nested completion executions.
  * @return True when succeeded continuation pumps.
@@ -117,12 +117,11 @@ extern void bounce_deinit(BOUNCE_CORE *r);
  * dispatchable and then returns without blocking for future work. A zero value
  * disables inline nested execution and preserves the traditional
  * ready-queue-only behavior.
- * Warning: bounce_park_once() is a supplemental API.
- * If you use bounce_park_once() regularly as part of an infinite loop,
- * shutdown may not function correctly.
- * To ensure shutdown is handled safely, you must use bounce_park() instead of bounce_park_once().
+ * WARNING: `bounce_dangerous_unsafe_park_once()` is a HIGHLY INTERNAL function,
+ * and there is almost NO legitimate reason to call it from outside.
+ * You should almost always use `bounce_park()` instead.
  */
-extern bool bounce_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth);
+/* DANGEROUS UNSAFE: extern bool bounce_dangerous_unsafe_park_once(BOUNCE_CORE *r, unsigned int max_inline_depth); */
 
 /**
  * @brief Set the current thread/task-local bounce core pointer.
@@ -373,42 +372,6 @@ public:
       ::bounce_shutdown(bounce_, wait_for_idle);
     }
   }
-
-  /**
-   * @brief Pump current thread once without waiting for new completion work.
-   * @return True when succeeded continuation pumps.
-   * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work. Call
-   * `set_default()` first when callbacks or coroutine helpers on this thread
-   * need `get_current()`.
-   * Warning: park_once() is a supplemental API.
-   * If you use park_once() regularly as part of an infinite loop,
-   * shutdown may not function correctly.
-   * To ensure shutdown is handled safely, you must use park() instead of park_once().
-   */
-  inline bool park_once() noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park_once(bounce_, 0u) :
-             false;
-  }
-
-  /**
-   * @brief Pump current thread once without waiting for new completion work.
-   * @param max_inline_depth Maximum number of inline nested completion executions.
-   * @return True when succeeded continuation pumps.
-   * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. Call `set_default()` first when
-   * callbacks or coroutine helpers on this thread need `get_current()`.
-   * Warning: park_once() is a supplemental API.
-   * If you use park_once() regularly as part of an infinite loop,
-   * shutdown may not function correctly.
-   * To ensure shutdown is handled safely, you must use park() instead of park_once().
-   */
-  inline bool park_once(unsigned int max_inline_depth) noexcept {
-    return (bounce_ != nullptr) ?
-             ::bounce_park_once(bounce_, max_inline_depth) :
-             false;
-  }
 };
 
 template <typename TBOUNCE_CORE> class bounce_base {
@@ -563,38 +526,6 @@ public:
    */
   inline void shutdown(bool wait_for_idle = true) noexcept {
     ::bounce_shutdown(&bounce_, wait_for_idle);
-  }
-
-  /**
-   * @brief Pump current thread once without waiting for new completion work.
-   * @return True when succeeded continuation pumps.
-   * @remarks This executes completion work that is already immediately
-   * dispatchable and then returns without blocking for future work. Call
-   * `set_default()` first when callbacks or coroutine helpers on this thread
-   * need `get_current()`.
-   * Warning: park_once() is a supplemental API.
-   * If you use park_once() regularly as part of an infinite loop,
-   * shutdown may not function correctly.
-   * To ensure shutdown is handled safely, you must use park() instead of park_once().
-   */
-  inline bool park_once() noexcept {
-    return ::bounce_park_once(&bounce_, 0u);
-  }
-
-  /**
-   * @brief Pump current thread once without waiting for new completion work.
-   * @param max_inline_depth Maximum number of inline nested completion executions.
-   * @return True when succeeded continuation pumps.
-   * @remarks A zero value disables inline nested execution and preserves the
-   * traditional ready-queue-only behavior. Call `set_default()` first when
-   * callbacks or coroutine helpers on this thread need `get_current()`.
-   * Warning: park_once() is a supplemental API.
-   * If you use park_once() regularly as part of an infinite loop,
-   * shutdown may not function correctly.
-   * To ensure shutdown is handled safely, you must use park() instead of park_once().
-   */
-  inline bool park_once(unsigned int max_inline_depth) noexcept {
-    return ::bounce_park_once(&bounce_, max_inline_depth);
   }
 };
 
