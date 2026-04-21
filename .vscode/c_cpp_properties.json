@@ -3,13 +3,14 @@
   "configurations": [
     {
       "name": "Linux POSIX",
-      "compilerPath": "/usr/bin/cc",
+      "compilerPath": "/usr/bin/c++",
       "intelliSenseMode": "linux-gcc-x64",
       "cStandard": "c99",
-      "cppStandard": "c++17",
+      "cppStandard": "c++20",
       "defines": [
         "_XOPEN_SOURCE=700",
-        "BOUNCE_POSIX=1"
+        "BOUNCE_POSIX=1",
+        "__linux__"
       ],
       "compilerArgs": [
         "-pthread"
@@ -30,12 +31,13 @@
     },
     {
       "name": "Linux POSIX-GLib",
-      "compilerPath": "/usr/bin/cc",
+      "compilerPath": "/usr/bin/c++",
       "intelliSenseMode": "linux-gcc-x64",
       "cStandard": "c99",
-      "cppStandard": "c++17",
+      "cppStandard": "c++20",
       "defines": [
-        "BOUNCE_POSIX_GLIB=1"
+        "BOUNCE_POSIX_GLIB=1",
+        "__linux__"
       ],
       "compilerArgs": [
         "-pthread"
@@ -44,11 +46,27 @@
         "${workspaceFolder}/include",
         "${workspaceFolder}",
         "${workspaceFolder}/tests",
+        "/usr/include/gtk-3.0",
+        "/usr/include/pango-1.0",
         "/usr/include/glib-2.0",
         "/usr/lib/x86_64-linux-gnu/glib-2.0/include",
-        "/usr/include/gio-unix-2.0",
+        "/usr/include/harfbuzz",
+        "/usr/include/freetype2",
+        "/usr/include/libpng16",
         "/usr/include/libmount",
-        "/usr/include/blkid"
+        "/usr/include/blkid",
+        "/usr/include/fribidi",
+        "/usr/include/cairo",
+        "/usr/include/pixman-1",
+        "/usr/include/gdk-pixbuf-2.0",
+        "/usr/include/x86_64-linux-gnu",
+        "/usr/include/webp",
+        "/usr/include/gio-unix-2.0",
+        "/usr/include/atk-1.0",
+        "/usr/include/at-spi2-atk/2.0",
+        "/usr/include/at-spi-2.0",
+        "/usr/include/dbus-1.0",
+        "/usr/lib/x86_64-linux-gnu/dbus-1.0/include"
       ],
       "browse": {
         "path": [
@@ -56,21 +74,37 @@
           "${workspaceFolder}/src",
           "${workspaceFolder}/tests",
           "${workspaceFolder}/samples",
+          "/usr/include/gtk-3.0",
+          "/usr/include/pango-1.0",
           "/usr/include/glib-2.0",
           "/usr/lib/x86_64-linux-gnu/glib-2.0/include",
-          "/usr/include/gio-unix-2.0",
+          "/usr/include/harfbuzz",
+          "/usr/include/freetype2",
+          "/usr/include/libpng16",
           "/usr/include/libmount",
-          "/usr/include/blkid"
+          "/usr/include/blkid",
+          "/usr/include/fribidi",
+          "/usr/include/cairo",
+          "/usr/include/pixman-1",
+          "/usr/include/gdk-pixbuf-2.0",
+          "/usr/include/x86_64-linux-gnu",
+          "/usr/include/webp",
+          "/usr/include/gio-unix-2.0",
+          "/usr/include/atk-1.0",
+          "/usr/include/at-spi2-atk/2.0",
+          "/usr/include/at-spi-2.0",
+          "/usr/include/dbus-1.0",
+          "/usr/lib/x86_64-linux-gnu/dbus-1.0/include"
         ],
         "limitSymbolsToIncludedHeaders": true
       }
     },
     {
       "name": "Linux FreeRTOS (POSIX port)",
-      "compilerPath": "/usr/bin/cc",
+      "compilerPath": "/usr/bin/c++",
       "intelliSenseMode": "linux-gcc-x64",
       "cStandard": "c99",
-      "cppStandard": "c++17",
+      "cppStandard": "c++20",
       "defines": [
         "_XOPEN_SOURCE=700",
         "BOUNCE_FREERTOS=1"
@@ -100,10 +134,10 @@
     },
     {
       "name": "ESP-IDF FreeRTOS fd await",
-      "compilerPath": "/usr/bin/cc",
+      "compilerPath": "/usr/bin/c++",
       "intelliSenseMode": "linux-gcc-x64",
       "cStandard": "c99",
-      "cppStandard": "c++17",
+      "cppStandard": "c++20",
       "defines": [
         "_XOPEN_SOURCE=700",
         "BOUNCE_FREERTOS=1",
@@ -135,10 +169,10 @@
     },
     {
       "name": "Win32 x64 (MinGW)",
-      "compilerPath": "/usr/bin/x86_64-w64-mingw32-gcc",
+      "compilerPath": "/usr/bin/x86_64-w64-mingw32-g++-win32",
       "intelliSenseMode": "windows-gcc-x64",
       "cStandard": "c99",
-      "cppStandard": "c++17",
+      "cppStandard": "c++20",
       "defines": [
         "_WIN32",
         "_WIN64"
@@ -160,12 +194,13 @@
     },
     {
       "name": "Win32 x86 (MinGW)",
-      "compilerPath": "/usr/bin/i686-w64-mingw32-gcc",
+      "compilerPath": "/usr/bin/i686-w64-mingw32-g++-win32",
       "intelliSenseMode": "windows-gcc-x86",
       "cStandard": "c99",
-      "cppStandard": "c++17",
+      "cppStandard": "c++20",
       "defines": [
-        "_WIN32"
+        "_WIN32",
+        "LIBBOUNCE_ENABLE_COROUTINE_TESTS=1"
       ],
       "includePath": [
         "${workspaceFolder}/include",

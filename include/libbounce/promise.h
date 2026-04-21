@@ -1007,6 +1007,102 @@ public:
 
 namespace detail {
 
+class detached_promise_runner {
+public:
+  struct promise_type;
+
+private:
+  std::coroutine_handle<promise_type> handle_;
+
+  explicit inline detached_promise_runner(
+    std::coroutine_handle<promise_type> handle) noexcept
+    : handle_(handle) {
+  }
+
+public:
+  struct promise_type {
+    struct final_awaiter {
+      inline bool await_ready() const noexcept {
+        return false;
+      }
+
+      inline void await_suspend(
+        std::coroutine_handle<promise_type> completed_handle) const noexcept {
+        completed_handle.destroy();
+      }
+
+      inline void await_resume() const noexcept {
+      }
+    };
+
+    inline detached_promise_runner get_return_object() noexcept {
+      return detached_promise_runner(
+        std::coroutine_handle<promise_type>::from_promise(*this));
+    }
+
+    inline std::suspend_always initial_suspend() const noexcept {
+      return std::suspend_always {};
+    }
+
+    inline final_awaiter final_suspend() const noexcept {
+      return final_awaiter {};
+    }
+
+    inline void return_void() const noexcept {
+    }
+
+    inline void unhandled_exception() const noexcept {
+      std::terminate();
+    }
+  };
+
+  detached_promise_runner(const detached_promise_runner&) = delete;
+  detached_promise_runner& operator=(const detached_promise_runner&) = delete;
+
+  inline detached_promise_runner(detached_promise_runner&& other) noexcept
+    : handle_(other.handle_) {
+    other.handle_ = std::coroutine_handle<promise_type> {};
+  }
+
+  inline detached_promise_runner& operator=(detached_promise_runner&& other) noexcept {
+    if (this != &other) {
+      if (handle_) {
+        handle_.destroy();
+      }
+      handle_ = other.handle_;
+      other.handle_ = std::coroutine_handle<promise_type> {};
+    }
+    return *this;
+  }
+
+  inline ~detached_promise_runner() noexcept {
+    if (handle_) {
+      handle_.destroy();
+    }
+  }
+
+  inline bool start() noexcept {
+    if (!handle_) {
+      return false;
+    }
+
+    std::coroutine_handle<promise_type> handle = handle_;
+
+    handle_ = std::coroutine_handle<promise_type> {};
+    handle.resume();
+    return true;
+  }
+};
+
+template<typename T>
+static inline detached_promise_runner fire_and_forget_impl(promise<T> operation) {
+  if constexpr (std::is_void_v<T>) {
+    co_await operation;
+  } else {
+    (void)co_await operation;
+  }
+}
+
 template<typename TResult, typename TMAPPER, typename... TCALLBACK_ARGS>
 class callback_promise_context {
 private:
@@ -1256,6 +1352,29 @@ inline promise<callback_promise_result<TResult>> make_callback_promise(
       std::forward<TSTART_FN>(start),
       std::forward<TMAPPER>(mapper),
       cancellation);
+}
+
+template<typename T>
+/**
+ * @brief Start a libbounce coroutine and detach it until completion.
+ * @tparam T Promise result type. The result value is discarded.
+ * @param operation Promise whose coroutine frame is transferred to the
+ * detached runner.
+ * @return True when the promise was non-empty and the detached runner started.
+ * @remarks The caller must pass the promise with `std::move()`. Any exception
+ * escaping from the detached coroutine is treated as unhandled and terminates
+ * the process.
+ */
+inline bool fire_and_forget(promise<T>&& operation) noexcept {
+  if (!operation) {
+    return false;
+  }
+
+  try {
+    return detail::fire_and_forget_impl<T>(std::move(operation)).start();
+  } catch (...) {
+    return false;
+  }
 }
 
 template<typename TBOUNCE_HANDLE>

@@ -47,6 +47,9 @@ extern void test_cpp_promise_make_callback_promise_start_failed(void);
 extern void test_cpp_promise_nested_value_runs(void);
 extern void test_cpp_promise_exception_propagates(void);
 extern void test_cpp_promise_await_canceled_runs(void);
+extern void test_cpp_promise_fire_and_forget_void_runs(void);
+extern void test_cpp_promise_fire_and_forget_value_runs(void);
+extern void test_cpp_promise_fire_and_forget_empty_fails(void);
 extern void test_cpp_promise_handle_await_runs(void);
 #endif
 
@@ -1663,6 +1666,9 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_nested_value_runs),
     TEST_CASE_ENTRY(test_cpp_promise_exception_propagates),
     TEST_CASE_ENTRY(test_cpp_promise_await_canceled_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_void_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_value_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_empty_fails),
     TEST_CASE_ENTRY(test_cpp_promise_handle_await_runs),
 #endif
     TEST_CASE_ENTRY(test_park_once_returns_before_timeout_completion),

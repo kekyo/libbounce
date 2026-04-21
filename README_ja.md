@@ -677,6 +677,7 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 |`libbounce::make_awaitable(...)`|`(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)` を受け取る開始関数から `await_operation` を作る|
 |`libbounce::resume_on(bounce)`|現在の coroutine を `bounce_post()` 経由で parker 上へ hop させる|
 |`libbounce::await_canceled(bounce, cancellation)`|キャンセル通知そのものを `co_await` する|
+|`libbounce::fire_and_forget(std::move(promise))`|`promise<T>` を開始し、結果を破棄しながら完了まで生存させる|
 |`bounce.await(...)` / `bounce_ref.await(...)`|各バックエンドの待機対象を直接 `co_await` できる形で登録する|
 
 `make_awaitable()` に渡す開始関数は、
@@ -688,6 +689,10 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 また、`libbounce::promise<T>` は eager ではなく lazy start です。
 生成した coroutine は `start()` を呼ぶまで走り出さず、
 開始済みで未完了の promise を破棄するのはプログラミングエラーになります。
+結果を待つ呼び出し元が存在しない場合は、
+`libbounce::fire_and_forget(std::move(promise))` を使用します。
+これは内部の detached runner に所有権を移し、戻り値は破棄します。
+detached coroutine から例外が外へ出た場合は、未処理例外としてプロセスを終了します。
 
 ---
 

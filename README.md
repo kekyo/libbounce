@@ -750,6 +750,7 @@ The central types and functions are as follows.
 |`libbounce::make_awaitable(...)`|Creates an `await_operation` from a start function that takes `(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)`|
 |`libbounce::resume_on(bounce)`|Hops the current coroutine onto a parker through `bounce_post()`|
 |`libbounce::await_canceled(bounce, cancellation)`|`co_await`s the cancellation notification itself|
+|`libbounce::fire_and_forget(std::move(promise))`|Starts a `promise<T>` and keeps it alive until completion while discarding the result|
 |`bounce.await(...)` / `bounce_ref.await(...)`|Registers backend wait targets directly in a form that can be `co_await`ed|
 
 The start function passed to `make_awaitable()` must return `false` on local
@@ -762,6 +763,10 @@ into `co_await` without a large rewrite.
 Also, `libbounce::promise<T>` uses lazy start rather than eager start.
 A created coroutine does not begin running until you call `start()`, and
 destroying a started but unfinished promise is a programming error.
+Use `libbounce::fire_and_forget(std::move(promise))` when no caller will await
+the result. It transfers ownership to an internal detached runner; result
+values are discarded, and any exception escaping from the detached coroutine is
+treated as unhandled and terminates the process.
 
 ---
 

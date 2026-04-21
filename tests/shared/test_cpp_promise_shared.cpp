@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #if !defined(BOUNCE_FREERTOS)
 #include <thread>
@@ -57,6 +58,7 @@
 
 using TEST_COMPLETION_CONTEXT = TEST_CPP_RUNTIME_COMPLETION_CONTEXT;
 using TEST_PARK_THREAD_CONTEXT = TEST_CPP_RUNTIME_PARKER_CONTEXT;
+using TEST_DESTRUCTION_COUNTER = TEST_CPP_RUNTIME_DESTRUCTION_COUNTER;
 
 static double test_cpp_monotonic_now_ms(void) {
   return std::chrono::duration<double, std::milli>(
@@ -128,6 +130,16 @@ static void test_assert_completion_on_parker(
     test_cpp_runtime_completion_ran_on_parker(
       context,
       park_context));
+}
+
+static void test_wait_destroyed_count(
+  TEST_DESTRUCTION_COUNTER *destroyed_count,
+  int expected_destroyed_count) {
+  ASSERT_TRUE(
+    test_cpp_runtime_wait_destruction_count(
+      destroyed_count,
+      expected_destroyed_count,
+      TEST_TIMEOUT_MS));
 }
 
 static void test_start_parker(
@@ -244,6 +256,22 @@ static void test_io_uring_timeout_prepare(
 #endif
 
 struct TEST_PROMISE_EXCEPTION {
+};
+
+struct TEST_PROMISE_DESTRUCTION_PROBE {
+  TEST_DESTRUCTION_COUNTER *destroyed_count;
+
+  explicit TEST_PROMISE_DESTRUCTION_PROBE(
+    TEST_DESTRUCTION_COUNTER *destroyed_count_)
+    : destroyed_count(destroyed_count_) {
+  }
+
+  TEST_PROMISE_DESTRUCTION_PROBE(const TEST_PROMISE_DESTRUCTION_PROBE&) = delete;
+  TEST_PROMISE_DESTRUCTION_PROBE& operator=(const TEST_PROMISE_DESTRUCTION_PROBE&) = delete;
+
+  ~TEST_PROMISE_DESTRUCTION_PROBE() {
+    test_cpp_runtime_destruction_counter_increment(destroyed_count);
+  }
 };
 
 static libbounce::promise<void> test_resume_on_coroutine(
@@ -425,6 +453,31 @@ static libbounce::promise<void> test_await_canceled_coroutine(
 
   ASSERT_TRUE(result.canceled());
   test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_fire_and_forget_void_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context,
+  TEST_DESTRUCTION_COUNTER *destroyed_count) {
+  TEST_PROMISE_DESTRUCTION_PROBE probe(destroyed_count);
+  const libbounce::await_result result = co_await libbounce::resume_on(bounce_instance);
+
+  (void)probe;
+  ASSERT_TRUE(result.completed());
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<int> test_fire_and_forget_value_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context,
+  TEST_DESTRUCTION_COUNTER *destroyed_count) {
+  TEST_PROMISE_DESTRUCTION_PROBE probe(destroyed_count);
+  const libbounce::await_result result = co_await libbounce::resume_on(bounce_instance);
+
+  (void)probe;
+  ASSERT_TRUE(result.completed());
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+  co_return 42;
 }
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
@@ -727,6 +780,56 @@ extern "C" void test_cpp_promise_await_canceled_runs(void) {
   test_wait_promise_done(&coroutine);
   test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
   test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_fire_and_forget_void_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  TEST_DESTRUCTION_COUNTER destroyed_count;
+  auto coroutine = test_fire_and_forget_void_coroutine(
+    bounce_instance,
+    &completion_context,
+    &destroyed_count);
+
+  test_completion_context_init(&completion_context);
+  test_cpp_runtime_destruction_counter_init(&destroyed_count);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(libbounce::fire_and_forget(std::move(coroutine)));
+  ASSERT_TRUE(!coroutine);
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_wait_destroyed_count(&destroyed_count, 1);
+  ASSERT_TRUE(test_cpp_runtime_destruction_count(&destroyed_count) == 1);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_fire_and_forget_value_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  TEST_DESTRUCTION_COUNTER destroyed_count;
+  auto coroutine = test_fire_and_forget_value_coroutine(
+    bounce_instance,
+    &completion_context,
+    &destroyed_count);
+
+  test_completion_context_init(&completion_context);
+  test_cpp_runtime_destruction_counter_init(&destroyed_count);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(libbounce::fire_and_forget(std::move(coroutine)));
+  ASSERT_TRUE(!coroutine);
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_wait_destroyed_count(&destroyed_count, 1);
+  ASSERT_TRUE(test_cpp_runtime_destruction_count(&destroyed_count) == 1);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_fire_and_forget_empty_fails(void) {
+  libbounce::promise<void> coroutine;
+
+  ASSERT_TRUE(!libbounce::fire_and_forget(std::move(coroutine)));
 }
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
