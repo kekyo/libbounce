@@ -16,14 +16,14 @@
 
 //////////////////////////////////////////////////////////////////////////////////
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 
 /**
  * @brief Use the file descriptor's current offset for file read/write helpers.
  * @remarks Positioned reads and writes use the supplied non-negative offset.
- * Passing this sentinel makes the POSIX backend call `read()` / `write()`
- * instead of `pread()` / `pwrite()`. Linux io_uring maps this value to the
- * kernel's current-offset operation.
+ * Passing this sentinel makes the POSIX-based backends call `read()` /
+ * `write()` instead of `pread()` / `pwrite()`. Linux io_uring maps this value
+ * to the kernel's current-offset operation.
  */
 #define BOUNCE_FILE_OFFSET_CURRENT INT64_C(-1)
 
@@ -88,11 +88,11 @@ extern bool bounce_file_io_active(const BOUNCE_FILE_IO *operation);
  * @param completion_state User provided completion callback state.
  * @param cancellation Cancellation when provided.
  * @return True when local setup succeeded.
- * @remarks Linux uses io_uring when the POSIX core initialized it
- * successfully. Otherwise the POSIX fallback waits for fd readability and then
- * runs `read()` / `pread()` on the parked thread. For regular files and other
- * descriptors, that fallback syscall can still block while the operation is
- * executing.
+ * @remarks Linux uses io_uring when the POSIX-based core initialized it
+ * successfully. Otherwise the fallback waits for fd readability through the
+ * backend and then runs `read()` / `pread()` on the parked thread. For regular
+ * files and other descriptors, that fallback syscall can still block while the
+ * operation is executing.
  */
 extern bool bounce_await_file_read(
   BOUNCE_CORE *r,
@@ -117,11 +117,11 @@ extern bool bounce_await_file_read(
  * @param completion_state User provided completion callback state.
  * @param cancellation Cancellation when provided.
  * @return True when local setup succeeded.
- * @remarks Linux uses io_uring when the POSIX core initialized it
- * successfully. Otherwise the POSIX fallback waits for fd writability and then
- * runs `write()` / `pwrite()` on the parked thread. For regular files and
- * other descriptors, that fallback syscall can still block while the operation
- * is executing.
+ * @remarks Linux uses io_uring when the POSIX-based core initialized it
+ * successfully. Otherwise the fallback waits for fd writability through the
+ * backend and then runs `write()` / `pwrite()` on the parked thread. For
+ * regular files and other descriptors, that fallback syscall can still block
+ * while the operation is executing.
  */
 extern bool bounce_await_file_write(
   BOUNCE_CORE *r,
@@ -168,9 +168,9 @@ extern bool bounce_await_file_seek(
  * @param completion_state User provided completion callback state.
  * @param cancellation Cancellation when provided.
  * @return True when local setup succeeded.
- * @remarks Linux uses io_uring fsync when the POSIX core initialized it
- * successfully. Otherwise the POSIX fallback queues `fsync()` / `fdatasync()`
- * onto the parked thread. That fallback syscall can block while executing.
+ * @remarks Linux uses io_uring fsync when the POSIX-based core initialized it
+ * successfully. Otherwise the fallback queues `fsync()` / `fdatasync()` onto
+ * the parked thread. That fallback syscall can block while executing.
  */
 extern bool bounce_await_file_flush(
   BOUNCE_CORE *r,

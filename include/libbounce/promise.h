@@ -76,7 +76,7 @@ struct await_result {
   }
 };
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 /**
  * @brief Result returned from coroutine file I/O helpers.
  * @remarks The await state reports helper completion. The syscall-level result
@@ -1637,6 +1637,9 @@ inline await_operation bounce::await(
 }
 #endif
 
+#endif
+
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 namespace detail {
 
 template<typename START_FN>

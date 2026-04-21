@@ -119,7 +119,7 @@ static_assert(
   "libbounce::condition must not be move assignable");
 #endif
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static_assert(
   !std::is_copy_constructible<libbounce::file_io>::value,
   "libbounce::file_io must not be copy constructible");
@@ -336,7 +336,7 @@ static void test_signal_pipe_readable(const int *pipe_fds) {
 }
 #endif
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static int test_open_temporary_file(void);
 
 extern "C" void test_cpp_wrapper_file_io_runs(void) {
@@ -434,7 +434,7 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
 }
 #endif
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static int test_open_temporary_file(void) {
   char path[] = "/tmp/libbounce_cpp_file_io_XXXXXX";
   const int fd = mkstemp(path);

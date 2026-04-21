@@ -187,7 +187,7 @@ static void test_set_nonblocking(int fd) {
   ASSERT_TRUE(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
 }
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static int test_open_temporary_file(void) {
   char path[] = "/tmp/libbounce_cpp20_file_io_XXXXXX";
   const int fd = mkstemp(path);
@@ -573,7 +573,7 @@ static libbounce::promise<void> test_fd_write_all_bytes_coroutine(
 }
 #endif
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static libbounce::promise<void> test_file_io_async_coroutine(
   int fd,
   TEST_COMPLETION_CONTEXT *completion_context) {
@@ -1005,7 +1005,7 @@ extern "C" void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_run
   test_close_pipe(pipe_fds);
 }
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 extern "C" void test_cpp_promise_file_io_async_runs(void) {
   libbounce::bounce bounce_instance;
   TEST_PARK_THREAD_CONTEXT park_context;

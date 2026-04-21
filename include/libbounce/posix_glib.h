@@ -152,6 +152,36 @@ struct BOUNCE_TIMER {
 };
 
 /**
+ * @brief Caller-owned file I/O helper operation.
+ * @remarks This helper is independent from the core wait-item pools. Linux
+ * read/write/flush operations reuse the backend's one-shot io_uring operation
+ * support when available; otherwise GLib fd readiness/post helpers dispatch
+ * the final syscall on the parked GLib context.
+ */
+struct BOUNCE_FILE_IO {
+  pthread_mutex_t lock;
+  BOUNCE_CANCELLATION_REGISTRATION cancellation_registration;
+#if defined(__linux__)
+  BOUNCE_POSIX_IO_URING_OP io_uring_operation;
+#endif
+  BOUNCE_CORE *bounce;
+  BOUNCE_COMPLETION completion;
+  void *completion_state;
+  int fd;
+  void *buffer;
+  const void *const_buffer;
+  int64_t offset;
+  size_t length;
+  int whence;
+  BOUNCE_FILE_FLUSH_MODE flush_mode;
+  int operation;
+  int64_t result;
+  int error_code;
+  bool active;
+  bool cancellation_registration_active;
+};
+
+/**
  * @brief Bounce core storage.
  * @remarks The GLib backend owns a custom ready `GSource` attached to the main
  * context. `bounce_park()` drives that context and only one parker is valid at
@@ -612,6 +642,23 @@ public:
   }
 };
 #endif
+
+/**
+ * @brief Caller-owned file I/O operation storage for the C++ helper API.
+ */
+class file_io : public file_io_base<BOUNCE_CORE, BOUNCE_FILE_IO> {
+public:
+  /**
+   * @brief Initialize the file I/O operation.
+   */
+  inline file_io() noexcept: file_io_base() {
+  }
+
+  /**
+   * @brief Deinitialize the file I/O operation.
+   */
+  ~file_io() = default;
+};
 
 /**
  * @brief Caller-owned backend-local timer storage for the C++ helper API.

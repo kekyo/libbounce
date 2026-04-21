@@ -12,14 +12,17 @@ LIBURING_LIBS := $(shell $(PKG_CONFIG) --libs liburing 2>/dev/null)
 SOURCES := \
 	src/posix-glib/bounce_tls_posix_glib.c \
 	src/posix-glib/bounce_posix_glib.c \
+	src/posix/bounce_posix_file.c \
 	src/posix-glib/bounce_posix_glib_timer.c
 TEST_SOURCES := \
 	tests/posix-glib/test_posix_glib.c \
 	tests/posix-glib/test_posix_glib_gtk3_example.cpp \
 	tests/posix-glib/test_posix_io_uring_glib_gtk3_example.cpp \
+	tests/shared/test_file_header_shared.c \
 	tests/shared/test_timer_header_shared.c \
 	tests/shared/test_cpp_runtime_host.cpp \
 	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_file_header_cpp_shared.cpp \
 	tests/shared/test_timer_header_cpp_shared.cpp \
 	tests/shared/test_cpp_promise_shared.cpp \
 	tests/test_harness.c

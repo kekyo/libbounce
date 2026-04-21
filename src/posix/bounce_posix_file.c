@@ -9,7 +9,7 @@
 #define _GNU_SOURCE
 #endif
 
-#if defined(BOUNCE_POSIX)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 
 #include <errno.h>
 #include <poll.h>
@@ -440,6 +440,32 @@ static void bounce_posix_file_ready_completion(
     error_code);
 }
 
+static void bounce_posix_file_await_transfer_ready(
+  BOUNCE_CORE *r,
+  int fd,
+  bool writable,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation) {
+#if defined(BOUNCE_POSIX_GLIB)
+  bounce_await_posix_glib_fd(
+    r,
+    fd,
+    writable ? G_IO_OUT : G_IO_IN,
+    completion,
+    completion_state,
+    cancellation);
+#else
+  bounce_await_posix_fd(
+    r,
+    fd,
+    writable ? POLLOUT : POLLIN,
+    completion,
+    completion_state,
+    cancellation);
+#endif
+}
+
 #if defined(__linux__)
 static uint64_t bounce_posix_file_io_uring_offset(int64_t offset) {
   return (offset == BOUNCE_FILE_OFFSET_CURRENT) ?
@@ -511,7 +537,34 @@ static void bounce_posix_file_io_uring_completion(
 }
 
 static bool bounce_posix_file_can_use_io_uring(BOUNCE_CORE *r) {
+#if defined(BOUNCE_POSIX_GLIB)
+  return (r != NULL) && (r->io_uring_ring != NULL);
+#else
   return (r != NULL) && r->linux_unified_wait_enabled;
+#endif
+}
+
+static void bounce_posix_file_await_io_uring(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_IO_URING_OP *io_uring_operation,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation) {
+#if defined(BOUNCE_POSIX_GLIB)
+  bounce_await_posix_glib_io_uring_op(
+    r,
+    io_uring_operation,
+    completion,
+    completion_state,
+    cancellation);
+#else
+  bounce_await_posix_io_uring_op(
+    r,
+    io_uring_operation,
+    completion,
+    completion_state,
+    cancellation);
+#endif
 }
 #endif
 
@@ -591,7 +644,7 @@ bool bounce_await_file_read(
 
 #if defined(__linux__)
   if (bounce_posix_file_can_use_io_uring(r)) {
-    bounce_await_posix_io_uring_op(
+    bounce_posix_file_await_io_uring(
       r,
       &operation->io_uring_operation,
       bounce_posix_file_io_uring_completion,
@@ -601,10 +654,10 @@ bool bounce_await_file_read(
   }
 #endif
 
-  bounce_await_posix_fd(
+  bounce_posix_file_await_transfer_ready(
     r,
     fd,
-    POLLIN,
+    false,
     bounce_posix_file_ready_completion,
     operation,
     cancellation);
@@ -643,7 +696,7 @@ bool bounce_await_file_write(
 
 #if defined(__linux__)
   if (bounce_posix_file_can_use_io_uring(r)) {
-    bounce_await_posix_io_uring_op(
+    bounce_posix_file_await_io_uring(
       r,
       &operation->io_uring_operation,
       bounce_posix_file_io_uring_completion,
@@ -653,10 +706,10 @@ bool bounce_await_file_write(
   }
 #endif
 
-  bounce_await_posix_fd(
+  bounce_posix_file_await_transfer_ready(
     r,
     fd,
-    POLLOUT,
+    true,
     bounce_posix_file_ready_completion,
     operation,
     cancellation);
@@ -714,7 +767,7 @@ bool bounce_await_file_flush(
 
 #if defined(__linux__)
   if (bounce_posix_file_can_use_io_uring(r)) {
-    bounce_await_posix_io_uring_op(
+    bounce_posix_file_await_io_uring(
       r,
       &operation->io_uring_operation,
       bounce_posix_file_io_uring_completion,

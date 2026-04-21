@@ -651,7 +651,7 @@ Each backend adds its own wait targets and helper types.
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|None|Single-parker generic core with busy-spin parking and timer polling, without backend-specific wait targets|
 |POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|Wait for fd readiness based on `poll()`. A lightweight one-shot condition and file I/O helpers are also available. Linux can also await one-shot `io_uring` submissions|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. Linux can also forward `io_uring` completions back into the same parked GLib context|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. File I/O helpers use that GLib context, and Linux can also forward `io_uring` completions back into it|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|Notify a condition from both task context and ISR context|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|Wait for fd readiness only when `BOUNCE_FREERTOS_ENABLE_FD_AWAIT` is enabled|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|Wait on `HANDLE`s such as events and waitable timers|
@@ -675,8 +675,10 @@ The intended usage for each backend is as follows.
   Intended for applications that already use the GLib main loop.
   The ready queue is processed as a source on `GMainContext`, so it integrates
   naturally with the GLib model.
-  On Linux, `io_uring` completions are also bridged back into that same
-  `GMainContext`.
+  File helper read/write operations use Linux `io_uring` when it is available;
+  otherwise they wait for fd readiness through `GSource` and then execute the
+  POSIX syscall on the parker. On Linux, `io_uring` completions are also
+  bridged back into that same `GMainContext`.
 - FreeRTOS:
   Suitable when running a task as a parker and handling lightweight condition
   notifications or timers.
@@ -724,7 +726,7 @@ The backend-specific differences are mostly in the arguments of `wait(...)`,
 |:----|:----|
 |Generic|No additional backend-local wait methods. Use `post()` and `libbounce::timer`|
 |POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`|
@@ -751,8 +753,8 @@ The central types and functions are as follows.
 |`libbounce::await_operation`|Awaitable object that makes callback-based registrations `co_await`-able|
 |`libbounce::promise<T>`|Return type for libbounce coroutines. Start it with `start()`, or `co_await` it from another coroutine|
 |`libbounce::make_awaitable(...)`|Creates an `await_operation` from a start function that takes `(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)`|
-|`libbounce::file_io_result`|POSIX file helper result for coroutine APIs. Contains the await result, syscall result, and errno value|
-|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|POSIX C++20 file helper APIs returning `promise<file_io_result>`|
+|`libbounce::file_io_result`|POSIX-based file helper result for coroutine APIs. Contains the await result, syscall result, and errno value|
+|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|POSIX-based C++20 file helper APIs returning `promise<file_io_result>`|
 |`libbounce::resume_on(bounce)`|Hops the current coroutine onto a parker through `bounce_post()`|
 |`libbounce::await_canceled(bounce, cancellation)`|`co_await`s the cancellation notification itself|
 |`libbounce::fire_and_forget(std::move(promise))`|Starts a `promise<T>` and keeps it alive until completion while discarding the result|
@@ -779,8 +781,9 @@ treated as unhandled and terminates the process.
 
 ### POSIX File I/O Helpers
 
-The POSIX backend provides helper APIs in `libbounce/file.h` through
-`libbounce/posix.h` for common file operations:
+The POSIX and POSIX+GLib backends provide helper APIs in `libbounce/file.h`
+through `libbounce/posix.h` or `libbounce/posix_glib.h` for common file
+operations:
 
 - C API:
   `bounce_await_file_read()`, `bounce_await_file_write()`,
@@ -793,11 +796,12 @@ The POSIX backend provides helper APIs in `libbounce/file.h` through
 
 Read and write take an explicit offset. Pass `BOUNCE_FILE_OFFSET_CURRENT` when
 you want to use the descriptor's current file offset instead.
-On Linux, read, write, and flush use the POSIX backend's `io_uring` integration
-when that integration initialized successfully. Otherwise, read and write first
-await fd readiness and then run `read()` / `write()` or `pread()` / `pwrite()`
-on the parked thread; flush runs `fsync()` / `fdatasync()` on the parked
-thread. Those non-`io_uring` syscall steps may still block while executing.
+On Linux, read, write, and flush use the active backend's `io_uring`
+integration when that integration initialized successfully. Otherwise, read and
+write first await fd readiness and then run `read()` / `write()` or
+`pread()` / `pwrite()` on the parked thread; flush runs `fsync()` /
+`fdatasync()` on the parked thread. The POSIX+GLib fallback waits through
+`GSource`. Those non-`io_uring` syscall steps may still block while executing.
 Seek is implemented with queued `lseek()` because it has no `io_uring`
 submission form.
 
