@@ -5,7 +5,13 @@
  * https://github.com/kekyo/libbounce
  */
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdbool.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +50,7 @@ extern void test_cpp_wrapper_lambda_condition_await_aborts_on_deinit(void);
 extern void test_cpp_wrapper_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_aborts_on_deinit(void);
+extern void test_cpp_wrapper_file_io_runs(void);
 #endif
 
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
@@ -64,6 +71,7 @@ extern void test_cpp_promise_condition_await_runs(void);
 #if defined(BOUNCE_POSIX)
 extern void test_cpp_promise_fd_await_runs(void);
 extern void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs(void);
+extern void test_cpp_promise_file_io_async_runs(void);
 #if defined(__linux__)
 extern void test_cpp_io_uring_operation_init_accessors(void);
 extern void test_cpp_promise_io_uring_await_runs(void);
@@ -1078,6 +1086,145 @@ static void test_single_fd_write_await_runs(void) {
   ASSERT_TRUE(close(pipe_fds[0]) == 0);
   ASSERT_TRUE(close(pipe_fds[1]) == 0);
 }
+
+#if defined(BOUNCE_POSIX)
+static int test_open_temporary_file(void) {
+  char path[] = "/tmp/libbounce_file_io_XXXXXX";
+  const int fd = mkstemp(path);
+
+  ASSERT_TRUE(fd >= 0);
+  ASSERT_TRUE(unlink(path) == 0);
+  return fd;
+}
+
+static void test_file_read_write_seek_flush_await_runs(void) {
+  static const char payload[] = "libbounce file helper payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  char buffer[sizeof payload];
+  const int fd = test_open_temporary_file();
+
+  memset(&buffer[0], 0, sizeof buffer);
+  bounce_init(&bounce);
+  bounce_file_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_await_file_write(
+    &bounce,
+    &operation,
+    fd,
+    &payload[0],
+    0,
+    sizeof payload,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  test_completion_context_destroy(&completion_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_await_file_flush(
+    &bounce,
+    &operation,
+    fd,
+    BOUNCE_FILE_FLUSH_FULL,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == 0);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  test_completion_context_destroy(&completion_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_await_file_seek(
+    &bounce,
+    &operation,
+    fd,
+    0,
+    SEEK_SET,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == 0);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  test_completion_context_destroy(&completion_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_await_file_read(
+    &bounce,
+    &operation,
+    fd,
+    &buffer[0],
+    BOUNCE_FILE_OFFSET_CURRENT,
+    sizeof buffer,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+  test_completion_context_destroy(&completion_context);
+
+  test_stop_parker(&bounce, &park_context);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(fd) == 0);
+}
+
+static void test_file_read_await_cancel_completes_canceled(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  BOUNCE_CANCELLATION cancellation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int pipe_fds[2];
+  unsigned char byte = 0u;
+
+  ASSERT_TRUE(pipe(&pipe_fds[0]) == 0);
+  bounce_init(&bounce);
+  bounce_file_io_init(&operation);
+  bounce_cancellation_init(&cancellation);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, true, NULL);
+  ASSERT_TRUE(bounce_await_file_read(
+    &bounce,
+    &operation,
+    pipe_fds[0],
+    &byte,
+    BOUNCE_FILE_OFFSET_CURRENT,
+    sizeof byte,
+    test_completion_callback,
+    &completion_context,
+    &cancellation));
+  bounce_cancel(&bounce, &cancellation);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(test_completion_result(&completion_context) == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == -1);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == ECANCELED);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(pipe_fds[0]) == 0);
+  ASSERT_TRUE(close(pipe_fds[1]) == 0);
+}
+#endif
 #endif
 
 static void test_single_timeout_runs(void) {
@@ -2029,6 +2176,7 @@ int test_run_posix_freertos_shared_suite(
   TEST_APPEND_CASE(test_cpp_wrapper_fd_await_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_fd_await_runs);
   TEST_APPEND_CASE(test_cpp_wrapper_lambda_fd_await_aborts_on_deinit);
+  TEST_APPEND_CASE(test_cpp_wrapper_file_io_runs);
 #endif
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
   TEST_APPEND_CASE(test_cpp_promise_resume_on_runs);
@@ -2048,6 +2196,7 @@ int test_run_posix_freertos_shared_suite(
 #if defined(BOUNCE_POSIX)
   TEST_APPEND_CASE(test_cpp_promise_fd_await_runs);
   TEST_APPEND_CASE(test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs);
+  TEST_APPEND_CASE(test_cpp_promise_file_io_async_runs);
 #if defined(__linux__)
   TEST_APPEND_CASE(test_cpp_io_uring_operation_init_accessors);
   TEST_APPEND_CASE(test_cpp_promise_io_uring_await_runs);
@@ -2071,6 +2220,10 @@ int test_run_posix_freertos_shared_suite(
   if (config->supports_fd_await) {
     TEST_APPEND_CASE(test_single_fd_read_await_runs);
     TEST_APPEND_CASE(test_single_fd_write_await_runs);
+#if defined(BOUNCE_POSIX)
+    TEST_APPEND_CASE(test_file_read_write_seek_flush_await_runs);
+    TEST_APPEND_CASE(test_file_read_await_cancel_completes_canceled);
+#endif
   }
 #endif
   TEST_APPEND_CASE(test_single_timeout_runs);

@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -185,6 +186,17 @@ static void test_set_nonblocking(int fd) {
   ASSERT_TRUE(flags >= 0);
   ASSERT_TRUE(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
 }
+
+#if defined(BOUNCE_POSIX)
+static int test_open_temporary_file(void) {
+  char path[] = "/tmp/libbounce_cpp20_file_io_XXXXXX";
+  const int fd = mkstemp(path);
+
+  ASSERT_TRUE(fd >= 0);
+  ASSERT_TRUE(unlink(path) == 0);
+  return fd;
+}
+#endif
 
 static size_t test_fill_pipe_until_would_block(int fd) {
   std::array<unsigned char, 4096u> buffer {};
@@ -556,6 +568,57 @@ static libbounce::promise<void> test_fd_write_all_bytes_coroutine(
     write_context->bytes_written.fetch_add((size_t)result, std::memory_order_relaxed);
     written += (size_t)result;
   }
+
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+#endif
+
+#if defined(BOUNCE_POSIX)
+static libbounce::promise<void> test_file_io_async_coroutine(
+  int fd,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  static const char payload[] = "libbounce C++20 file helper payload";
+  char buffer[sizeof payload];
+
+  memset(&buffer[0], 0, sizeof buffer);
+
+  const libbounce::file_io_result write_result =
+    co_await libbounce::write_async(
+      fd,
+      &payload[0],
+      0,
+      sizeof payload,
+      NULL);
+  ASSERT_TRUE(write_result.succeeded());
+  ASSERT_TRUE(write_result.result == (int64_t)sizeof payload);
+
+  const libbounce::file_io_result flush_result =
+    co_await libbounce::flush_async(
+      fd,
+      BOUNCE_FILE_FLUSH_FULL,
+      NULL);
+  ASSERT_TRUE(flush_result.succeeded());
+  ASSERT_TRUE(flush_result.result == 0);
+
+  const libbounce::file_io_result seek_result =
+    co_await libbounce::seek_async(
+      fd,
+      0,
+      SEEK_SET,
+      NULL);
+  ASSERT_TRUE(seek_result.succeeded());
+  ASSERT_TRUE(seek_result.result == 0);
+
+  const libbounce::file_io_result read_result =
+    co_await libbounce::read_async(
+      fd,
+      &buffer[0],
+      BOUNCE_FILE_OFFSET_CURRENT,
+      sizeof buffer,
+      NULL);
+  ASSERT_TRUE(read_result.succeeded());
+  ASSERT_TRUE(read_result.result == (int64_t)sizeof payload);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
 
   test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
 }
@@ -941,6 +1004,29 @@ extern "C" void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_run
   test_stop_parker(&bounce_instance, &park_context);
   test_close_pipe(pipe_fds);
 }
+
+#if defined(BOUNCE_POSIX)
+extern "C" void test_cpp_promise_file_io_async_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  const int fd = test_open_temporary_file();
+  auto coroutine = test_file_io_async_coroutine(
+    fd,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  bounce_set_fallback_core(bounce_instance.get_core());
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+  bounce_set_fallback_core(NULL);
+  ASSERT_TRUE(close(fd) == 0);
+}
+#endif
 
 #if defined(__linux__) && (defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB))
 extern "C" void test_cpp_io_uring_operation_init_accessors(void) {

@@ -5,9 +5,14 @@
  * https://github.com/kekyo/libbounce
  */
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #if !defined(BOUNCE_FREERTOS)
 #include <thread>
@@ -112,6 +117,21 @@ static_assert(
 static_assert(
   !std::is_move_assignable<libbounce::condition>::value,
   "libbounce::condition must not be move assignable");
+#endif
+
+#if defined(BOUNCE_POSIX)
+static_assert(
+  !std::is_copy_constructible<libbounce::file_io>::value,
+  "libbounce::file_io must not be copy constructible");
+static_assert(
+  !std::is_copy_assignable<libbounce::file_io>::value,
+  "libbounce::file_io must not be copy assignable");
+static_assert(
+  !std::is_move_constructible<libbounce::file_io>::value,
+  "libbounce::file_io must not be move constructible");
+static_assert(
+  !std::is_move_assignable<libbounce::file_io>::value,
+  "libbounce::file_io must not be move assignable");
 #endif
 
 using TEST_COMPLETION_CONTEXT = TEST_CPP_RUNTIME_COMPLETION_CONTEXT;
@@ -313,6 +333,115 @@ static void test_signal_pipe_readable(const int *pipe_fds) {
   const unsigned char byte = 1u;
 
   ASSERT_TRUE(write(pipe_fds[1], &byte, sizeof byte) == (ssize_t)sizeof byte);
+}
+#endif
+
+#if defined(BOUNCE_POSIX)
+static int test_open_temporary_file(void);
+
+extern "C" void test_cpp_wrapper_file_io_runs(void) {
+  static const char payload[] = "libbounce C++ file helper payload";
+  libbounce::bounce bounce_instance;
+  libbounce::file_io operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  char buffer[sizeof payload];
+  const int fd = test_open_temporary_file();
+
+  memset(&buffer[0], 0, sizeof buffer);
+  test_start_parker(&bounce_instance, &park_context);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(
+    operation.write(
+      bounce_instance,
+      fd,
+      &payload[0],
+      0,
+      sizeof payload,
+      [&completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_record_completion(&completion_context, result);
+      },
+      NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(operation.result() == (int64_t)sizeof payload);
+  ASSERT_TRUE(operation.error() == 0);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(
+    operation.flush(
+      bounce_instance,
+      fd,
+      BOUNCE_FILE_FLUSH_FULL,
+      [&completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_record_completion(&completion_context, result);
+      },
+      NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(operation.result() == 0);
+  ASSERT_TRUE(operation.error() == 0);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(
+    operation.seek(
+      bounce_instance,
+      fd,
+      0,
+      SEEK_SET,
+      [&completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_record_completion(&completion_context, result);
+      },
+      NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(operation.result() == 0);
+  ASSERT_TRUE(operation.error() == 0);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(
+    operation.read(
+      bounce_instance,
+      fd,
+      &buffer[0],
+      BOUNCE_FILE_OFFSET_CURRENT,
+      sizeof buffer,
+      [&completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_record_completion(&completion_context, result);
+      },
+      NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(operation.result() == (int64_t)sizeof payload);
+  ASSERT_TRUE(operation.error() == 0);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+
+  test_stop_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(close(fd) == 0);
+}
+#endif
+
+#if defined(BOUNCE_POSIX)
+static int test_open_temporary_file(void) {
+  char path[] = "/tmp/libbounce_cpp_file_io_XXXXXX";
+  const int fd = mkstemp(path);
+
+  ASSERT_TRUE(fd >= 0);
+  ASSERT_TRUE(unlink(path) == 0);
+  return fd;
 }
 #endif
 

@@ -589,7 +589,7 @@ bounce.set_default();
 |プラットフォーム|ヘッダ|追加API|用途|
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|なし|backend 固有 wait を持たない、単一 parker・busy spin 前提の汎用コア|
-|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition も使える。Linux では one-shot の `io_uring` 登録も待機可能|
+|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition と file I/O helper も使える。Linux では one-shot の `io_uring` 登録も待機可能|
 |POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|`GMainContext` / `GSource` に統合して fd readiness を待つ。Linux では `io_uring` 完了も同じ parked な GLib 文脈へ戻せる|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|タスク文脈・ISR文脈の両方から condition を通知できる|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|`BOUNCE_FREERTOS_ENABLE_FD_AWAIT` 有効時のみ fd readiness を待つ|
@@ -604,6 +604,8 @@ bounce.set_default();
 - POSIX:
   独自スレッドで `bounce_park()` させつつ、fd の readable / writable を待ちたい時に向いています。
   fd待機は `poll(2)` の `POLLIN`, `POLLOUT` などを使います。
+  file helper の read/write は、Linux で利用可能なら `io_uring` を使い、
+  それ以外では fd readiness を待ってから parker 上で POSIX syscall を実行します。
   Linux では同じ backend で one-shot の `io_uring` await も扱えます。
 - POSIX+GLib:
   既に GLib main loop を使っているアプリケーション向けです。
@@ -650,7 +652,7 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 |バックエンド|追加される主な型/メソッド|
 |:----|:----|
 |Generic|backend 固有の追加 wait はなし。`post()` と `libbounce::timer` を使う|
-|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
@@ -675,6 +677,8 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 |`libbounce::await_operation`|callback ベース登録を `co_await` 可能にする awaitable オブジェクト|
 |`libbounce::promise<T>`|libbounce 向け coroutine の戻り値型。`start()` で開始し、別 coroutine から `co_await` できる|
 |`libbounce::make_awaitable(...)`|`(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)` を受け取る開始関数から `await_operation` を作る|
+|`libbounce::file_io_result`|POSIX file helper の coroutine API が返す結果。await 結果、syscall 結果、errno 値を持つ|
+|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|`promise<file_io_result>` を返す POSIX C++20 file helper API|
 |`libbounce::resume_on(bounce)`|現在の coroutine を `bounce_post()` 経由で parker 上へ hop させる|
 |`libbounce::await_canceled(bounce, cancellation)`|キャンセル通知そのものを `co_await` する|
 |`libbounce::fire_and_forget(std::move(promise))`|`promise<T>` を開始し、結果を破棄しながら完了まで生存させる|
@@ -697,6 +701,30 @@ detached coroutine から例外が外へ出た場合は、未処理例外とし�
 ---
 
 ## 各プラットフォーム毎の注意点
+
+### POSIX File I/O Helper
+
+POSIX backend では、`libbounce/posix.h` 経由で `libbounce/file.h` の
+基本的なファイル操作 helper を利用できます。
+
+- C API:
+  `bounce_await_file_read()`, `bounce_await_file_write()`,
+  `bounce_await_file_seek()`, `bounce_await_file_flush()`
+- C++ API:
+  `libbounce::file_io` の `read()`, `write()`, `seek()`, `flush()`
+- C++20 API:
+  `libbounce::read_async()`, `write_async()`, `seek_async()`,
+  `flush_async()`
+
+read/write は明示的な offset を受け取ります。fd の現在 offset を使う場合は
+`BOUNCE_FILE_OFFSET_CURRENT` を渡します。
+Linux では、POSIX backend の `io_uring` 統合が初期化できている場合、
+read/write/flush は `io_uring` を使います。それ以外では read/write は
+fd readiness を待ってから parker 上で `read()` / `write()` または
+`pread()` / `pwrite()` を実行し、flush は parker 上で
+`fsync()` / `fdatasync()` を実行します。この非 `io_uring` 経路の
+syscall 実行中にはブロッキングが発生する可能性があります。
+seek は対応する `io_uring` submission がないため、queued `lseek()` として実装されています。
 
 ### Linux `io_uring`
 

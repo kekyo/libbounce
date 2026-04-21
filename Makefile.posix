@@ -7,14 +7,17 @@ LIBURING_LIBS := $(shell $(PKG_CONFIG) --libs liburing 2>/dev/null)
 SOURCES := \
 	src/posix/bounce_tls_posix.c \
 	src/posix/bounce_posix.c \
+	src/posix/bounce_posix_file.c \
 	src/posix/bounce_posix_timer.c
 TEST_SOURCES := \
 	tests/posix/test_posix.c \
 	tests/posix/test_posix_runtime.c \
+	tests/shared/test_file_header_shared.c \
 	tests/shared/test_timer_header_shared.c \
 	tests/shared/test_cpp_runtime_host.cpp \
 	tests/shared/test_posix_freertos_shared.c \
 	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_file_header_cpp_shared.cpp \
 	tests/shared/test_timer_header_cpp_shared.cpp \
 	tests/shared/test_cpp_promise_shared.cpp \
 	tests/test_harness.c

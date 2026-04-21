@@ -414,7 +414,7 @@ paragraph=Provides C and C++ helper APIs with backend adapters for FreeRTOS, ESP
 category=Other
 url=$PROJECT_HOMEPAGE
 architectures=esp32
-includes=libbounce/bounce.h,libbounce/timer.h,libbounce/freertos.h,libbounce/promise.h
+includes=libbounce/bounce.h,libbounce/file.h,libbounce/timer.h,libbounce/freertos.h,libbounce/promise.h
 EOF
 
 	cat >"$package_root/library.json" <<EOF
@@ -451,6 +451,7 @@ EOF
   ],
   "headers": [
     "libbounce/bounce.h",
+    "libbounce/file.h",
     "libbounce/timer.h",
     "libbounce/freertos.h",
     "libbounce/promise.h",

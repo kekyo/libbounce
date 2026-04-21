@@ -76,6 +76,81 @@ struct await_result {
   }
 };
 
+#if defined(BOUNCE_POSIX)
+/**
+ * @brief Result returned from coroutine file I/O helpers.
+ * @remarks The await state reports helper completion. The syscall-level result
+ * is stored in @ref result and @ref error_code so POSIX errors can be reported
+ * without treating them as libbounce infrastructure aborts.
+ */
+struct file_io_result {
+  await_result await {};
+  int64_t result = -1;
+  int error_code = 0;
+
+  /**
+   * @brief Create a default aborted file I/O result.
+   */
+  inline file_io_result() noexcept = default;
+
+  /**
+   * @brief Create a file I/O result.
+   * @param await_result_ Await completion state.
+   * @param result_ Bytes, seek offset, flush result, or -1.
+   * @param error_code_ POSIX errno value, or zero.
+   */
+  inline file_io_result(
+    await_result await_result_,
+    int64_t result_,
+    int error_code_) noexcept
+    : await(await_result_),
+      result(result_),
+      error_code(error_code_) {
+  }
+
+  /**
+   * @brief Check whether the helper completed normally.
+   * @return True when the helper completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the helper was canceled.
+   * @return True when the helper observed cancellation.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the helper aborted.
+   * @return True when the helper aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether helper setup failed before registration.
+   * @return True when local setup failed before asynchronous waiting began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+
+  /**
+   * @brief Check whether the file operation itself succeeded.
+   * @return True when the await completed and the syscall-level result is not
+   * an error.
+   */
+  inline bool succeeded() const noexcept {
+    return completed() && (error_code == 0) && (result >= 0);
+  }
+};
+#endif
+
 /**
  * @brief Promise result produced by callback-backed helpers.
  * @tparam T Mapped callback payload type, or `void`.
@@ -1561,6 +1636,385 @@ inline await_operation bounce::await(
     cancellation);
 }
 #endif
+
+namespace detail {
+
+template<typename START_FN>
+static inline await_operation make_file_awaitable_core(
+  BOUNCE_CORE *core,
+  START_FN&& start,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  return (core != nullptr) ?
+           await_operation::create(
+             std::forward<START_FN>(start),
+             cancellation) :
+           await_operation::from_immediate(
+             await_result { await_status::start_failed });
+}
+
+struct file_read_start {
+  BOUNCE_CORE *core;
+  BOUNCE_FILE_IO *operation;
+  int fd;
+  void *buffer;
+  int64_t offset;
+  size_t length;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_file_read(
+      core,
+      operation,
+      fd,
+      buffer,
+      offset,
+      length,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct file_write_start {
+  BOUNCE_CORE *core;
+  BOUNCE_FILE_IO *operation;
+  int fd;
+  const void *buffer;
+  int64_t offset;
+  size_t length;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_file_write(
+      core,
+      operation,
+      fd,
+      buffer,
+      offset,
+      length,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct file_seek_start {
+  BOUNCE_CORE *core;
+  BOUNCE_FILE_IO *operation;
+  int fd;
+  int64_t offset;
+  int whence;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_file_seek(
+      core,
+      operation,
+      fd,
+      offset,
+      whence,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct file_flush_start {
+  BOUNCE_CORE *core;
+  BOUNCE_FILE_IO *operation;
+  int fd;
+  BOUNCE_FILE_FLUSH_MODE mode;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_file_flush(
+      core,
+      operation,
+      fd,
+      mode,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+static inline promise<file_io_result> file_read_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  file_io operation;
+  const await_result result =
+    co_await make_file_awaitable_core(
+      core,
+      file_read_start {
+        core,
+        operation.get_file_io(),
+        fd,
+        buffer,
+        offset,
+        length },
+      cancellation);
+
+  co_return file_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<file_io_result> file_write_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  file_io operation;
+  const await_result result =
+    co_await make_file_awaitable_core(
+      core,
+      file_write_start {
+        core,
+        operation.get_file_io(),
+        fd,
+        buffer,
+        offset,
+        length },
+      cancellation);
+
+  co_return file_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<file_io_result> file_seek_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation) {
+  file_io operation;
+  const await_result result =
+    co_await make_file_awaitable_core(
+      core,
+      file_seek_start {
+        core,
+        operation.get_file_io(),
+        fd,
+        offset,
+        whence },
+      cancellation);
+
+  co_return file_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<file_io_result> file_flush_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  BOUNCE_FILE_FLUSH_MODE mode,
+  BOUNCE_CANCELLATION *cancellation) {
+  file_io operation;
+  const await_result result =
+    co_await make_file_awaitable_core(
+      core,
+      file_flush_start {
+        core,
+        operation.get_file_io(),
+        fd,
+        mode },
+      cancellation);
+
+  co_return file_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+}  // namespace detail
+
+inline promise<file_io_result> read_async(
+  bounce &bounce_handle,
+  int fd,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_read_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    offset,
+    length,
+    cancellation);
+}
+
+inline promise<file_io_result> read_async(
+  bounce_ref bounce_handle,
+  int fd,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_read_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    offset,
+    length,
+    cancellation);
+}
+
+inline promise<file_io_result> read_async(
+  int fd,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_read_async_core(
+    ::bounce_get_core(),
+    fd,
+    buffer,
+    offset,
+    length,
+    cancellation);
+}
+
+inline promise<file_io_result> write_async(
+  bounce &bounce_handle,
+  int fd,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_write_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    offset,
+    length,
+    cancellation);
+}
+
+inline promise<file_io_result> write_async(
+  bounce_ref bounce_handle,
+  int fd,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_write_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    offset,
+    length,
+    cancellation);
+}
+
+inline promise<file_io_result> write_async(
+  int fd,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_write_async_core(
+    ::bounce_get_core(),
+    fd,
+    buffer,
+    offset,
+    length,
+    cancellation);
+}
+
+inline promise<file_io_result> seek_async(
+  bounce &bounce_handle,
+  int fd,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_seek_async_core(
+    bounce_handle.get_core(),
+    fd,
+    offset,
+    whence,
+    cancellation);
+}
+
+inline promise<file_io_result> seek_async(
+  bounce_ref bounce_handle,
+  int fd,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_seek_async_core(
+    bounce_handle.get_core(),
+    fd,
+    offset,
+    whence,
+    cancellation);
+}
+
+inline promise<file_io_result> seek_async(
+  int fd,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_seek_async_core(
+    ::bounce_get_core(),
+    fd,
+    offset,
+    whence,
+    cancellation);
+}
+
+inline promise<file_io_result> flush_async(
+  bounce &bounce_handle,
+  int fd,
+  BOUNCE_FILE_FLUSH_MODE mode,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_flush_async_core(
+    bounce_handle.get_core(),
+    fd,
+    mode,
+    cancellation);
+}
+
+inline promise<file_io_result> flush_async(
+  bounce_ref bounce_handle,
+  int fd,
+  BOUNCE_FILE_FLUSH_MODE mode,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_flush_async_core(
+    bounce_handle.get_core(),
+    fd,
+    mode,
+    cancellation);
+}
+
+inline promise<file_io_result> flush_async(
+  int fd,
+  BOUNCE_FILE_FLUSH_MODE mode,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::file_flush_async_core(
+    ::bounce_get_core(),
+    fd,
+    mode,
+    cancellation);
+}
 #endif
 
 #if defined(BOUNCE_POSIX_GLIB)
