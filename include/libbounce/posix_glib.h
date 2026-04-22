@@ -14,6 +14,7 @@
 
 #include <glib.h>
 #include <pthread.h>
+#include <sys/socket.h>
 #include <time.h>
 
 #include "bounce.h"
@@ -174,6 +175,41 @@ struct BOUNCE_FILE_IO {
   size_t length;
   int whence;
   BOUNCE_FILE_FLUSH_MODE flush_mode;
+  int operation;
+  int64_t result;
+  int error_code;
+  bool active;
+  bool cancellation_registration_active;
+};
+
+/**
+ * @brief Caller-owned socket I/O helper operation.
+ * @remarks This helper is independent from the core wait-item pools. Linux
+ * socket operations reuse the backend's one-shot io_uring operation support
+ * when available; otherwise GLib fd readiness/post helpers dispatch the final
+ * socket syscall on the parked GLib context.
+ */
+struct BOUNCE_SOCKET_IO {
+  pthread_mutex_t lock;
+  BOUNCE_CANCELLATION_REGISTRATION cancellation_registration;
+#if defined(__linux__)
+  BOUNCE_POSIX_IO_URING_OP io_uring_operation;
+#endif
+  BOUNCE_CORE *bounce;
+  BOUNCE_COMPLETION completion;
+  void *completion_state;
+  BOUNCE_CANCELLATION *cancellation;
+  int fd;
+  void *buffer;
+  const void *const_buffer;
+  struct sockaddr *address;
+  const struct sockaddr *const_address;
+  socklen_t address_length;
+  socklen_t *address_length_pointer;
+  struct msghdr *message;
+  const struct msghdr *const_message;
+  size_t length;
+  int flags;
   int operation;
   int64_t result;
   int error_code;
@@ -658,6 +694,23 @@ public:
    * @brief Deinitialize the file I/O operation.
    */
   ~file_io() = default;
+};
+
+/**
+ * @brief Caller-owned socket I/O operation storage for the C++ helper API.
+ */
+class socket_io : public socket_io_base<BOUNCE_CORE, BOUNCE_SOCKET_IO> {
+public:
+  /**
+   * @brief Initialize the socket I/O operation.
+   */
+  inline socket_io() noexcept: socket_io_base() {
+  }
+
+  /**
+   * @brief Deinitialize the socket I/O operation.
+   */
+  ~socket_io() = default;
 };
 
 /**

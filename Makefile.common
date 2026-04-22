@@ -25,6 +25,7 @@ EXTRA_TEST_LINK_OBJECTS ?=
 PUBLIC_HEADERS := \
 	include/libbounce/bounce.h \
 	include/libbounce/file.h \
+	include/libbounce/socket.h \
 	include/libbounce/timer.h \
 	include/libbounce/promise.h \
 	include/libbounce/posix.h \

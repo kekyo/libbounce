@@ -24,6 +24,7 @@
 #endif
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -132,6 +133,18 @@ static_assert(
 static_assert(
   !std::is_move_assignable<libbounce::file_io>::value,
   "libbounce::file_io must not be move assignable");
+static_assert(
+  !std::is_copy_constructible<libbounce::socket_io>::value,
+  "libbounce::socket_io must not be copy constructible");
+static_assert(
+  !std::is_copy_assignable<libbounce::socket_io>::value,
+  "libbounce::socket_io must not be copy assignable");
+static_assert(
+  !std::is_move_constructible<libbounce::socket_io>::value,
+  "libbounce::socket_io must not be move constructible");
+static_assert(
+  !std::is_move_assignable<libbounce::socket_io>::value,
+  "libbounce::socket_io must not be move assignable");
 #endif
 
 using TEST_COMPLETION_CONTEXT = TEST_CPP_RUNTIME_COMPLETION_CONTEXT;
@@ -431,6 +444,65 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
 
   test_stop_parker(&bounce_instance, &park_context);
   ASSERT_TRUE(close(fd) == 0);
+}
+
+extern "C" void test_cpp_wrapper_socket_io_runs(void) {
+  static const char payload[] = "libbounce C++ socket helper payload";
+  libbounce::bounce bounce_instance;
+  libbounce::socket_io operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int socket_fds[2];
+  char buffer[sizeof payload];
+
+  memset(&buffer[0], 0, sizeof buffer);
+  ASSERT_TRUE(socketpair(AF_UNIX, SOCK_STREAM, 0, &socket_fds[0]) == 0);
+  test_start_parker(&bounce_instance, &park_context);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(
+    operation.send(
+      bounce_instance,
+      socket_fds[0],
+      &payload[0],
+      sizeof payload,
+      0,
+      [&completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_record_completion(&completion_context, result);
+      },
+      NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(operation.result() == (int64_t)sizeof payload);
+  ASSERT_TRUE(operation.error() == 0);
+
+  test_completion_context_init(&completion_context);
+  ASSERT_TRUE(
+    operation.recv(
+      bounce_instance,
+      socket_fds[1],
+      &buffer[0],
+      sizeof buffer,
+      0,
+      [&completion_context](BOUNCE_COMPLETION_RESULT result) {
+        test_record_completion(&completion_context, result);
+      },
+      NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  test_assert_completion_on_parker(
+    &completion_context,
+    &park_context,
+    BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(operation.result() == (int64_t)sizeof payload);
+  ASSERT_TRUE(operation.error() == 0);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+
+  test_stop_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(close(socket_fds[0]) == 0);
+  ASSERT_TRUE(close(socket_fds[1]) == 0);
 }
 #endif
 

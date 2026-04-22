@@ -32,6 +32,7 @@
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -622,6 +623,38 @@ static libbounce::promise<void> test_file_io_async_coroutine(
 
   test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
 }
+
+static libbounce::promise<void> test_socket_io_async_coroutine(
+  const int *socket_fds,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  static const char payload[] = "libbounce C++20 socket helper payload";
+  char buffer[sizeof payload];
+
+  memset(&buffer[0], 0, sizeof buffer);
+
+  const libbounce::socket_io_result send_result =
+    co_await libbounce::send_async(
+      socket_fds[0],
+      &payload[0],
+      sizeof payload,
+      0,
+      NULL);
+  ASSERT_TRUE(send_result.succeeded());
+  ASSERT_TRUE(send_result.result == (int64_t)sizeof payload);
+
+  const libbounce::socket_io_result recv_result =
+    co_await libbounce::recv_async(
+      socket_fds[1],
+      &buffer[0],
+      sizeof buffer,
+      0,
+      NULL);
+  ASSERT_TRUE(recv_result.succeeded());
+  ASSERT_TRUE(recv_result.result == (int64_t)sizeof payload);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
 #endif
 
 #if defined(__linux__) && (defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB))
@@ -1025,6 +1058,30 @@ extern "C" void test_cpp_promise_file_io_async_runs(void) {
   test_stop_parker(&bounce_instance, &park_context);
   bounce_set_fallback_core(NULL);
   ASSERT_TRUE(close(fd) == 0);
+}
+
+extern "C" void test_cpp_promise_socket_io_async_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int socket_fds[2];
+
+  ASSERT_TRUE(socketpair(AF_UNIX, SOCK_STREAM, 0, &socket_fds[0]) == 0);
+  auto coroutine = test_socket_io_async_coroutine(
+    &socket_fds[0],
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  bounce_set_fallback_core(bounce_instance.get_core());
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+  bounce_set_fallback_core(NULL);
+  ASSERT_TRUE(close(socket_fds[0]) == 0);
+  ASSERT_TRUE(close(socket_fds[1]) == 0);
 }
 #endif
 

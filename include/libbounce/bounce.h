@@ -30,6 +30,7 @@ typedef struct BOUNCE_CORE BOUNCE_CORE;
 typedef struct BOUNCE_CANCELLATION BOUNCE_CANCELLATION;
 typedef struct BOUNCE_CANCELLATION_REGISTRATION BOUNCE_CANCELLATION_REGISTRATION;
 typedef struct BOUNCE_FILE_IO BOUNCE_FILE_IO;
+typedef struct BOUNCE_SOCKET_IO BOUNCE_SOCKET_IO;
 typedef struct BOUNCE_TIMER BOUNCE_TIMER;
 
 /**
@@ -243,9 +244,11 @@ struct await_result;
 class await_operation;
 template<typename T = void> class promise;
 struct file_io_result;
+struct socket_io_result;
 
 template <typename TBOUNCE_CORE> class bounce_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_FILE_IO> class file_io_base;
+template <typename TBOUNCE_CORE, typename TBOUNCE_SOCKET_IO> class socket_io_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_TIMER> class timer_base;
 template <typename TBOUNCE_CORE> class bounce_base_ref;
 
@@ -661,6 +664,7 @@ public:
 
 #include "timer.h"
 #include "file.h"
+#include "socket.h"
 
 #if defined(BOUNCE_GENERIC)
 #include "generic.h"

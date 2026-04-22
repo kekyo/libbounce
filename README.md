@@ -650,8 +650,8 @@ Each backend adds its own wait targets and helper types.
 |Platform|Header|Additional API|Purpose|
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|None|Single-parker generic core with busy-spin parking and timer polling, without backend-specific wait targets|
-|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|Wait for fd readiness based on `poll()`. A lightweight one-shot condition and file I/O helpers are also available. Linux can also await one-shot `io_uring` submissions|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. File I/O helpers use that GLib context, and Linux can also forward `io_uring` completions back into it|
+|POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|Wait for fd readiness based on `poll()`. Lightweight one-shot condition, file I/O helpers, and socket I/O helpers are also available. Linux can also await one-shot `io_uring` submissions|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. File and socket I/O helpers use that GLib context, and Linux can also forward `io_uring` completions back into it|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|Notify a condition from both task context and ISR context|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|Wait for fd readiness only when `BOUNCE_FREERTOS_ENABLE_FD_AWAIT` is enabled|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|Wait on `HANDLE`s such as events and waitable timers|
@@ -667,18 +667,18 @@ The intended usage for each backend is as follows.
   Suitable when you want to run `bounce_park()` on a dedicated thread while
   waiting for fd readability or writability.
   fd waiting uses `poll(2)` events such as `POLLIN` and `POLLOUT`.
-  File helper read/write operations use Linux `io_uring` when it is available;
-  otherwise they wait for fd readiness and then execute the POSIX syscall on
-  the parker. On Linux, the same backend also accepts one-shot `io_uring`
-  awaits.
+  File and socket helper transfer operations use Linux `io_uring` when it is
+  available; otherwise they wait for fd readiness and then execute the POSIX
+  syscall on the parker. On Linux, the same backend also accepts one-shot
+  `io_uring` awaits.
 - POSIX+GLib:
   Intended for applications that already use the GLib main loop.
   The ready queue is processed as a source on `GMainContext`, so it integrates
   naturally with the GLib model.
-  File helper read/write operations use Linux `io_uring` when it is available;
-  otherwise they wait for fd readiness through `GSource` and then execute the
-  POSIX syscall on the parker. On Linux, `io_uring` completions are also
-  bridged back into that same `GMainContext`.
+  File and socket helper transfer operations use Linux `io_uring` when it is
+  available; otherwise they wait for fd readiness through `GSource` and then
+  execute the POSIX syscall on the parker. On Linux, `io_uring` completions are
+  also bridged back into that same `GMainContext`.
 - FreeRTOS:
   Suitable when running a task as a parker and handling lightweight condition
   notifications or timers.
@@ -725,8 +725,8 @@ The backend-specific differences are mostly in the arguments of `wait(...)`,
 |Backend|Main additional types / methods|
 |:----|:----|
 |Generic|No additional backend-local wait methods. Use `post()` and `libbounce::timer`|
-|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` with `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` with `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`|
@@ -755,6 +755,8 @@ The central types and functions are as follows.
 |`libbounce::make_awaitable(...)`|Creates an `await_operation` from a start function that takes `(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)`|
 |`libbounce::file_io_result`|POSIX-based file helper result for coroutine APIs. Contains the await result, syscall result, and errno value|
 |`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|POSIX-based C++20 file helper APIs returning `promise<file_io_result>`|
+|`libbounce::socket_io_result`|POSIX-based socket helper result for coroutine APIs. Contains the await result, syscall result, and errno value|
+|`libbounce::recv_async()` / `send_async()` / `recv_from_async()` / `send_to_async()` / `recv_msg_async()` / `send_msg_async()`|POSIX-based C++20 socket helper APIs returning `promise<socket_io_result>`|
 |`libbounce::resume_on(bounce)`|Hops the current coroutine onto a parker through `bounce_post()`|
 |`libbounce::await_canceled(bounce, cancellation)`|`co_await`s the cancellation notification itself|
 |`libbounce::fire_and_forget(std::move(promise))`|Starts a `promise<T>` and keeps it alive until completion while discarding the result|
@@ -804,6 +806,36 @@ write first await fd readiness and then run `read()` / `write()` or
 `GSource`. Those non-`io_uring` syscall steps may still block while executing.
 Seek is implemented with queued `lseek()` because it has no `io_uring`
 submission form.
+
+### POSIX Socket I/O Helpers
+
+The POSIX and POSIX+GLib backends also provide helper APIs in
+`libbounce/socket.h` through `libbounce/posix.h` or `libbounce/posix_glib.h`
+for common socket transfer operations:
+
+- C API:
+  `bounce_await_socket_recv()`, `bounce_await_socket_send()`,
+  `bounce_await_socket_recvfrom()`, `bounce_await_socket_sendto()`,
+  `bounce_await_socket_recvmsg()`, and `bounce_await_socket_sendmsg()`.
+- C++ API:
+  `libbounce::socket_io` with `recv()`, `send()`, `recv_from()`,
+  `send_to()`, `recv_msg()`, and `send_msg()`.
+- C++20 API:
+  `libbounce::recv_async()`, `send_async()`, `recv_from_async()`,
+  `send_to_async()`, `recv_msg_async()`, and `send_msg_async()`.
+
+Each helper represents one socket syscall. A partial `send()` is a successful
+completion with the number of bytes sent, and a `recv()` result of zero is a
+successful EOF indication. Socket flags such as `MSG_NOSIGNAL` are supplied by
+the caller through the `flags` argument.
+
+On Linux, supported socket transfer helpers use the active backend's
+`io_uring` integration when it initialized successfully. Otherwise the helper
+waits for fd readability or writability and then runs the socket syscall on the
+parked thread or parked GLib context. When `MSG_DONTWAIT` is available,
+libbounce uses it internally on that fallback path so readiness races can be
+retried without blocking the parker. On platforms without that flag, the final
+fallback syscall may still block while executing.
 
 ### Linux `io_uring`
 

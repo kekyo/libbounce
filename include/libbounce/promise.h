@@ -149,6 +149,79 @@ struct file_io_result {
     return completed() && (error_code == 0) && (result >= 0);
   }
 };
+
+/**
+ * @brief Result returned from coroutine socket I/O helpers.
+ * @remarks The await state reports helper completion. The syscall-level result
+ * is stored in @ref result and @ref error_code so POSIX socket errors can be
+ * reported without treating them as libbounce infrastructure aborts.
+ */
+struct socket_io_result {
+  await_result await {};
+  int64_t result = -1;
+  int error_code = 0;
+
+  /**
+   * @brief Create a default aborted socket I/O result.
+   */
+  inline socket_io_result() noexcept = default;
+
+  /**
+   * @brief Create a socket I/O result.
+   * @param await_result_ Await completion state.
+   * @param result_ Bytes sent/received, EOF zero, zero-length result, or -1.
+   * @param error_code_ POSIX errno value, or zero.
+   */
+  inline socket_io_result(
+    await_result await_result_,
+    int64_t result_,
+    int error_code_) noexcept
+    : await(await_result_),
+      result(result_),
+      error_code(error_code_) {
+  }
+
+  /**
+   * @brief Check whether the helper completed normally.
+   * @return True when the helper completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the helper was canceled.
+   * @return True when the helper observed cancellation.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the helper aborted.
+   * @return True when the helper aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether helper setup failed before registration.
+   * @return True when local setup failed before asynchronous waiting began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+
+  /**
+   * @brief Check whether the socket operation itself succeeded.
+   * @return True when the await completed and the syscall-level result is not
+   * an error.
+   */
+  inline bool succeeded() const noexcept {
+    return completed() && (error_code == 0) && (result >= 0);
+  }
+};
 #endif
 
 /**
@@ -1847,6 +1920,333 @@ static inline promise<file_io_result> file_flush_async_core(
     operation.error());
 }
 
+template<typename START_FN>
+static inline await_operation make_socket_awaitable_core(
+  BOUNCE_CORE *core,
+  START_FN&& start,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  return (core != nullptr) ?
+           await_operation::create(
+             std::forward<START_FN>(start),
+             cancellation) :
+           await_operation::from_immediate(
+             await_result { await_status::start_failed });
+}
+
+struct socket_recv_start {
+  BOUNCE_CORE *core;
+  BOUNCE_SOCKET_IO *operation;
+  int fd;
+  void *buffer;
+  size_t length;
+  int flags;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_socket_recv(
+      core,
+      operation,
+      fd,
+      buffer,
+      length,
+      flags,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct socket_send_start {
+  BOUNCE_CORE *core;
+  BOUNCE_SOCKET_IO *operation;
+  int fd;
+  const void *buffer;
+  size_t length;
+  int flags;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_socket_send(
+      core,
+      operation,
+      fd,
+      buffer,
+      length,
+      flags,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct socket_recv_from_start {
+  BOUNCE_CORE *core;
+  BOUNCE_SOCKET_IO *operation;
+  int fd;
+  void *buffer;
+  size_t length;
+  int flags;
+  struct sockaddr *address;
+  socklen_t *address_length;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_socket_recvfrom(
+      core,
+      operation,
+      fd,
+      buffer,
+      length,
+      flags,
+      address,
+      address_length,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct socket_send_to_start {
+  BOUNCE_CORE *core;
+  BOUNCE_SOCKET_IO *operation;
+  int fd;
+  const void *buffer;
+  size_t length;
+  int flags;
+  const struct sockaddr *address;
+  socklen_t address_length;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_socket_sendto(
+      core,
+      operation,
+      fd,
+      buffer,
+      length,
+      flags,
+      address,
+      address_length,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct socket_recv_msg_start {
+  BOUNCE_CORE *core;
+  BOUNCE_SOCKET_IO *operation;
+  int fd;
+  struct msghdr *message;
+  int flags;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_socket_recvmsg(
+      core,
+      operation,
+      fd,
+      message,
+      flags,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+struct socket_send_msg_start {
+  BOUNCE_CORE *core;
+  BOUNCE_SOCKET_IO *operation;
+  int fd;
+  const struct msghdr *message;
+  int flags;
+
+  inline bool operator()(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *operation_cancellation) const noexcept {
+    return ::bounce_await_socket_sendmsg(
+      core,
+      operation,
+      fd,
+      message,
+      flags,
+      completion,
+      completion_state,
+      operation_cancellation);
+  }
+};
+
+static inline promise<socket_io_result> socket_recv_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  socket_io operation;
+  const await_result result =
+    co_await make_socket_awaitable_core(
+      core,
+      socket_recv_start {
+        core,
+        operation.get_socket_io(),
+        fd,
+        buffer,
+        length,
+        flags },
+      cancellation);
+
+  co_return socket_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<socket_io_result> socket_send_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  socket_io operation;
+  const await_result result =
+    co_await make_socket_awaitable_core(
+      core,
+      socket_send_start {
+        core,
+        operation.get_socket_io(),
+        fd,
+        buffer,
+        length,
+        flags },
+      cancellation);
+
+  co_return socket_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<socket_io_result> socket_recv_from_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  struct sockaddr *address,
+  socklen_t *address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  socket_io operation;
+  const await_result result =
+    co_await make_socket_awaitable_core(
+      core,
+      socket_recv_from_start {
+        core,
+        operation.get_socket_io(),
+        fd,
+        buffer,
+        length,
+        flags,
+        address,
+        address_length },
+      cancellation);
+
+  co_return socket_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<socket_io_result> socket_send_to_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  const struct sockaddr *address,
+  socklen_t address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  socket_io operation;
+  const await_result result =
+    co_await make_socket_awaitable_core(
+      core,
+      socket_send_to_start {
+        core,
+        operation.get_socket_io(),
+        fd,
+        buffer,
+        length,
+        flags,
+        address,
+        address_length },
+      cancellation);
+
+  co_return socket_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<socket_io_result> socket_recv_msg_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  socket_io operation;
+  const await_result result =
+    co_await make_socket_awaitable_core(
+      core,
+      socket_recv_msg_start {
+        core,
+        operation.get_socket_io(),
+        fd,
+        message,
+        flags },
+      cancellation);
+
+  co_return socket_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
+static inline promise<socket_io_result> socket_send_msg_async_core(
+  BOUNCE_CORE *core,
+  int fd,
+  const struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  socket_io operation;
+  const await_result result =
+    co_await make_socket_awaitable_core(
+      core,
+      socket_send_msg_start {
+        core,
+        operation.get_socket_io(),
+        fd,
+        message,
+        flags },
+      cancellation);
+
+  co_return socket_io_result(
+    result,
+    operation.result(),
+    operation.error());
+}
+
 }  // namespace detail
 
 inline promise<file_io_result> read_async(
@@ -2016,6 +2416,300 @@ inline promise<file_io_result> flush_async(
     ::bounce_get_core(),
     fd,
     mode,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_async(
+  bounce &bounce_handle,
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_async(
+  bounce_ref bounce_handle,
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_async(
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_async_core(
+    ::bounce_get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_async(
+  bounce &bounce_handle,
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_async(
+  bounce_ref bounce_handle,
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_async(
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_async_core(
+    ::bounce_get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_from_async(
+  bounce &bounce_handle,
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  struct sockaddr *address,
+  socklen_t *address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_from_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    address,
+    address_length,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_from_async(
+  bounce_ref bounce_handle,
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  struct sockaddr *address,
+  socklen_t *address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_from_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    address,
+    address_length,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_from_async(
+  int fd,
+  void *buffer,
+  size_t length,
+  int flags,
+  struct sockaddr *address,
+  socklen_t *address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_from_async_core(
+    ::bounce_get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    address,
+    address_length,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_to_async(
+  bounce &bounce_handle,
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  const struct sockaddr *address,
+  socklen_t address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_to_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    address,
+    address_length,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_to_async(
+  bounce_ref bounce_handle,
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  const struct sockaddr *address,
+  socklen_t address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_to_async_core(
+    bounce_handle.get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    address,
+    address_length,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_to_async(
+  int fd,
+  const void *buffer,
+  size_t length,
+  int flags,
+  const struct sockaddr *address,
+  socklen_t address_length,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_to_async_core(
+    ::bounce_get_core(),
+    fd,
+    buffer,
+    length,
+    flags,
+    address,
+    address_length,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_msg_async(
+  bounce &bounce_handle,
+  int fd,
+  struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_msg_async_core(
+    bounce_handle.get_core(),
+    fd,
+    message,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_msg_async(
+  bounce_ref bounce_handle,
+  int fd,
+  struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_msg_async_core(
+    bounce_handle.get_core(),
+    fd,
+    message,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> recv_msg_async(
+  int fd,
+  struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_recv_msg_async_core(
+    ::bounce_get_core(),
+    fd,
+    message,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_msg_async(
+  bounce &bounce_handle,
+  int fd,
+  const struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_msg_async_core(
+    bounce_handle.get_core(),
+    fd,
+    message,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_msg_async(
+  bounce_ref bounce_handle,
+  int fd,
+  const struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_msg_async_core(
+    bounce_handle.get_core(),
+    fd,
+    message,
+    flags,
+    cancellation);
+}
+
+inline promise<socket_io_result> send_msg_async(
+  int fd,
+  const struct msghdr *message,
+  int flags,
+  BOUNCE_CANCELLATION *cancellation) {
+  return detail::socket_send_msg_async_core(
+    ::bounce_get_core(),
+    fd,
+    message,
+    flags,
     cancellation);
 }
 #endif

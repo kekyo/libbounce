@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -39,6 +40,7 @@ extern void test_cpp_wrapper_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_aborts_on_deinit(void);
 extern void test_cpp_wrapper_file_io_runs(void);
+extern void test_cpp_wrapper_socket_io_runs(void);
 extern void test_posix_glib_gtk3_example_button_click_writes_sample_file(void);
 extern void test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file(void);
 
@@ -59,6 +61,7 @@ extern void test_cpp_promise_fire_and_forget_empty_fails(void);
 extern void test_cpp_promise_fd_await_runs(void);
 extern void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs(void);
 extern void test_cpp_promise_file_io_async_runs(void);
+extern void test_cpp_promise_socket_io_async_runs(void);
 #if defined(__linux__)
 extern void test_cpp_io_uring_operation_init_accessors(void);
 extern void test_cpp_promise_io_uring_await_runs(void);
@@ -69,6 +72,11 @@ extern void test_cpp_promise_io_uring_await_canceled_runs(void);
 #define TEST_TIMEOUT_MS 5000u
 #define TEST_NO_COMPLETION_TIMEOUT_MS 200u
 #define TEST_INLINE_BENCH_ITERATIONS 100000u
+#if defined(MSG_DONTWAIT)
+#define TEST_SOCKET_DONTWAIT_FLAG MSG_DONTWAIT
+#else
+#define TEST_SOCKET_DONTWAIT_FLAG 0
+#endif
 
 #define ASSERT_TRUE(expr)                                                        \
   do {                                                                           \
@@ -824,6 +832,145 @@ static void test_file_read_await_cancel_completes_canceled(void) {
   ASSERT_TRUE(close(pipe_fds[1]) == 0);
 }
 
+static void test_socket_send_recv_await_runs(void) {
+  static const char payload[] = "libbounce POSIX+GLib socket helper payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_SOCKET_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int socket_fds[2];
+  char buffer[sizeof payload];
+
+  memset(&buffer[0], 0, sizeof buffer);
+  ASSERT_TRUE(socketpair(AF_UNIX, SOCK_STREAM, 0, &socket_fds[0]) == 0);
+  bounce_init(&bounce);
+  bounce_socket_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_socket_send(
+    &bounce,
+    &operation,
+    socket_fds[0],
+    &payload[0],
+    sizeof payload,
+    0,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_socket_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_socket_io_error(&operation) == 0);
+  test_completion_context_destroy(&completion_context);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_socket_recv(
+    &bounce,
+    &operation,
+    socket_fds[1],
+    &buffer[0],
+    sizeof buffer,
+    0,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_socket_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_socket_io_error(&operation) == 0);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_socket_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(socket_fds[0]) == 0);
+  ASSERT_TRUE(close(socket_fds[1]) == 0);
+}
+
+static void test_socket_recvfrom_await_cancel_completes_canceled(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_SOCKET_IO operation;
+  BOUNCE_CANCELLATION cancellation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int socket_fds[2];
+  unsigned char byte = 0u;
+
+  ASSERT_TRUE(socketpair(AF_UNIX, SOCK_STREAM, 0, &socket_fds[0]) == 0);
+  bounce_init(&bounce);
+  bounce_socket_io_init(&operation);
+  bounce_cancellation_init(&cancellation);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_socket_recvfrom(
+    &bounce,
+    &operation,
+    socket_fds[1],
+    &byte,
+    sizeof byte,
+    0,
+    NULL,
+    NULL,
+    test_completion_callback,
+    &completion_context,
+    &cancellation));
+  bounce_cancel(&bounce, &cancellation);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(bounce_socket_io_result(&operation) == -1);
+  ASSERT_TRUE(bounce_socket_io_error(&operation) == ECANCELED);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_socket_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(socket_fds[0]) == 0);
+  ASSERT_TRUE(close(socket_fds[1]) == 0);
+}
+
+static void test_socket_send_await_reports_syscall_error(void) {
+  static const char payload[] = "x";
+  BOUNCE_CORE bounce;
+  BOUNCE_SOCKET_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int pipe_fds[2];
+
+  ASSERT_TRUE(pipe(&pipe_fds[0]) == 0);
+  bounce_init(&bounce);
+  bounce_socket_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_socket_send(
+    &bounce,
+    &operation,
+    pipe_fds[1],
+    &payload[0],
+    sizeof payload,
+    TEST_SOCKET_DONTWAIT_FLAG,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_socket_io_result(&operation) == -1);
+  ASSERT_TRUE(bounce_socket_io_error(&operation) == ENOTSOCK);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_socket_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(pipe_fds[0]) == 0);
+  ASSERT_TRUE(close(pipe_fds[1]) == 0);
+}
+
 static void test_post_then_fd_order(void) {
   BOUNCE_CORE bounce;
   TEST_PARK_THREAD_CONTEXT park_context;
@@ -1534,6 +1681,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_aborts_on_deinit),
     TEST_CASE_ENTRY(test_cpp_wrapper_file_io_runs),
+    TEST_CASE_ENTRY(test_cpp_wrapper_socket_io_runs),
     TEST_CASE_ENTRY(test_posix_glib_gtk3_example_button_click_writes_sample_file),
     TEST_CASE_ENTRY(test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file),
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
@@ -1553,6 +1701,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs),
     TEST_CASE_ENTRY(test_cpp_promise_file_io_async_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_socket_io_async_runs),
 #if defined(__linux__)
     TEST_CASE_ENTRY(test_cpp_io_uring_operation_init_accessors),
     TEST_CASE_ENTRY(test_cpp_promise_io_uring_await_runs),
@@ -1566,6 +1715,9 @@ int main(void) {
     TEST_CASE_ENTRY(test_single_fd_read_await_runs),
     TEST_CASE_ENTRY(test_file_read_write_seek_flush_await_runs),
     TEST_CASE_ENTRY(test_file_read_await_cancel_completes_canceled),
+    TEST_CASE_ENTRY(test_socket_send_recv_await_runs),
+    TEST_CASE_ENTRY(test_socket_recvfrom_await_cancel_completes_canceled),
+    TEST_CASE_ENTRY(test_socket_send_await_reports_syscall_error),
     TEST_CASE_ENTRY(test_post_then_fd_order),
     TEST_CASE_ENTRY(test_nested_post_inline_depth_benchmark),
     TEST_CASE_ENTRY(test_single_timeout_runs),
