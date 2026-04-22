@@ -654,7 +654,7 @@ Each backend adds its own wait targets and helper types.
 |POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. File and socket I/O helpers use that GLib context, and Linux can also forward `io_uring` completions back into it|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|Notify a condition from both task context and ISR context|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|Wait for fd readiness only when `BOUNCE_FREERTOS_ENABLE_FD_AWAIT` is enabled|
-|Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|Wait on `HANDLE`s such as events and waitable timers|
+|Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`|Wait on `HANDLE`s such as events and waitable timers. File I/O helpers are also available for Win32 file `HANDLE`s|
 
 The intended usage for each backend is as follows.
 
@@ -687,6 +687,8 @@ The intended usage for each backend is as follows.
 - Win32:
   Fits naturally into the `HANDLE`-based waiting model.
   It works especially well with event objects and waitable timers.
+  File helper read/write operations use Win32 overlapped I/O; seek and flush
+  run on a parked thread through the corresponding Win32 file APIs.
 
 The C++ helpers add backend-local `bounce.wait(...)`, `bounce.raise(...)`, and
 `bounce.await(...)` where they exist.
@@ -729,7 +731,7 @@ The backend-specific differences are mostly in the arguments of `wait(...)`,
 |POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` with `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
-|Win32|`bounce.wait(HANDLE, ...)`|
+|Win32|`bounce.wait(HANDLE, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()` for file `HANDLE`s|
 
 `post()` and the callable forms of `wait()` accept either a no-argument lambda
 or a lambda that takes `BOUNCE_COMPLETION_RESULT` as its single argument.
@@ -753,8 +755,8 @@ The central types and functions are as follows.
 |`libbounce::await_operation`|Awaitable object that makes callback-based registrations `co_await`-able|
 |`libbounce::promise<T>`|Return type for libbounce coroutines. Start it with `start()`, or `co_await` it from another coroutine|
 |`libbounce::make_awaitable(...)`|Creates an `await_operation` from a start function that takes `(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)`|
-|`libbounce::file_io_result`|POSIX-based file helper result for coroutine APIs. Contains the await result, syscall result, and errno value|
-|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|POSIX-based C++20 file helper APIs returning `promise<file_io_result>`|
+|`libbounce::file_io_result`|File helper result for coroutine APIs. Contains the await result, operation result, and backend native error code|
+|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|File helper APIs returning `promise<file_io_result>`|
 |`libbounce::socket_io_result`|POSIX-based socket helper result for coroutine APIs. Contains the await result, syscall result, and errno value|
 |`libbounce::recv_async()` / `send_async()` / `recv_from_async()` / `send_to_async()` / `recv_msg_async()` / `send_msg_async()`|POSIX-based C++20 socket helper APIs returning `promise<socket_io_result>`|
 |`libbounce::resume_on(bounce)`|Hops the current coroutine onto a parker through `bounce_post()`|
@@ -783,8 +785,8 @@ treated as unhandled and terminates the process.
 
 ### POSIX File I/O Helpers
 
-The POSIX and POSIX+GLib backends provide helper APIs in `libbounce/file.h`
-through `libbounce/posix.h` or `libbounce/posix_glib.h` for common file
+The POSIX and POSIX+GLib backends provide helper APIs through
+`libbounce/posix.h` or `libbounce/posix_glib.h` for common file
 operations:
 
 - C API:
@@ -806,6 +808,28 @@ write first await fd readiness and then run `read()` / `write()` or
 `GSource`. Those non-`io_uring` syscall steps may still block while executing.
 Seek is implemented with queued `lseek()` because it has no `io_uring`
 submission form.
+
+### Win32 File I/O Helpers
+
+The Win32 backend provides the same file helper shape through
+`libbounce/win32.h`:
+
+- C API:
+  `bounce_await_file_read()`, `bounce_await_file_write()`,
+  `bounce_await_file_seek()`, and `bounce_await_file_flush()`.
+- C++ API:
+  `libbounce::file_io` with `read()`, `write()`, `seek()`, and `flush()`.
+- C++20 API:
+  `libbounce::read_async()`, `write_async()`, `seek_async()`, and
+  `flush_async()`.
+
+Read and write take a Win32 file `HANDLE` opened for overlapped I/O, typically
+with `FILE_FLAG_OVERLAPPED`, and require an explicit non-negative offset.
+`BOUNCE_FILE_OFFSET_CURRENT` is not supported by the Win32 helper because
+overlapped file I/O uses the offset stored in `OVERLAPPED`. Seek uses
+`SetFilePointerEx()` and flush uses `FlushFileBuffers()` on a parked thread.
+`BOUNCE_FILE_FLUSH_DATA` maps to the same operation as
+`BOUNCE_FILE_FLUSH_FULL` on Win32.
 
 ### POSIX Socket I/O Helpers
 

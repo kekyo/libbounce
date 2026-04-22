@@ -16,7 +16,7 @@ static_assert(
   !std::is_copy_assignable<libbounce::file_io>::value,
   "libbounce::file_io must not be copy assignable when included from file.h");
 
-bool test_file_header_cpp_compiles(void) {
+extern "C" bool test_file_header_cpp_compiles(void) {
   libbounce::file_io operation;
 
   return operation.get_file_io() != nullptr;

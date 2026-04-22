@@ -593,7 +593,7 @@ bounce.set_default();
 |POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|`GMainContext` / `GSource` に統合して fd readiness を待つ。file/socket helper はその GLib 文脈を使う。Linux では `io_uring` 完了も同じ parked な GLib 文脈へ戻せる|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|タスク文脈・ISR文脈の両方から condition を通知できる|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|`BOUNCE_FREERTOS_ENABLE_FD_AWAIT` 有効時のみ fd readiness を待つ|
-|Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`|イベントや waitable timer などの `HANDLE` を待つ|
+|Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`|イベントや waitable timer などの `HANDLE` を待つ。Win32 file `HANDLE` 向けの file I/O helper も利用できる|
 
 それぞれの使い分けは次の通りです。
 
@@ -618,6 +618,8 @@ bounce.set_default();
 - Win32:
   `HANDLE` ベースの待機モデルにそのまま乗せられます。
   イベントオブジェクトや waitable timer と相性が良い構成です。
+  file helper の read/write は Win32 overlapped I/O を使い、seek/flush は
+  対応する Win32 file API を parker 上で実行します。
 
 C++ヘルパーでは、必要なバックエンドに対して `bounce.wait(...)`, `bounce.raise(...)`, `bounce.await(...)` が追加されます。
 つまり、どのバックエンドでも「ready になったら parker 上で継続を実行する」という中心の考え方は同じで、
@@ -657,7 +659,7 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 |POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` の `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
-|Win32|`bounce.wait(HANDLE, ...)`|
+|Win32|`bounce.wait(HANDLE, ...)`; file `HANDLE` 向け `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`|
 
 `post()` や `wait()` の callable 版には、引数なしラムダか
 `BOUNCE_COMPLETION_RESULT` を1引数で受け取るラムダを渡せます。
@@ -678,8 +680,8 @@ callback ベースの libbounce API を `co_await` へ橋渡しするための�
 |`libbounce::await_operation`|callback ベース登録を `co_await` 可能にする awaitable オブジェクト|
 |`libbounce::promise<T>`|libbounce 向け coroutine の戻り値型。`start()` で開始し、別 coroutine から `co_await` できる|
 |`libbounce::make_awaitable(...)`|`(BOUNCE_COMPLETION, void*, BOUNCE_CANCELLATION*)` を受け取る開始関数から `await_operation` を作る|
-|`libbounce::file_io_result`|POSIX file helper の coroutine API が返す結果。await 結果、syscall 結果、errno 値を持つ|
-|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|`promise<file_io_result>` を返す POSIX C++20 file helper API|
+|`libbounce::file_io_result`|file helper の coroutine API が返す結果。await 結果、操作結果、backend native error code を持つ|
+|`libbounce::read_async()` / `write_async()` / `seek_async()` / `flush_async()`|`promise<file_io_result>` を返す file helper API|
 |`libbounce::socket_io_result`|POSIX socket helper の coroutine API が返す結果。await 結果、syscall 結果、errno 値を持つ|
 |`libbounce::recv_async()` / `send_async()` / `recv_from_async()` / `send_to_async()` / `recv_msg_async()` / `send_msg_async()`|`promise<socket_io_result>` を返す POSIX C++20 socket helper API|
 |`libbounce::resume_on(bounce)`|現在の coroutine を `bounce_post()` 経由で parker 上へ hop させる|
@@ -707,7 +709,7 @@ detached coroutine から例外が外へ出た場合は、未処理例外とし�
 
 ### POSIX File I/O Helper
 
-POSIX backend では、`libbounce/posix.h` 経由で `libbounce/file.h` の
+POSIX backend では、`libbounce/posix.h` 経由で
 基本的なファイル操作 helper を利用できます。
 
 - C API:
@@ -728,6 +730,27 @@ fd readiness を待ってから parker 上で `read()` / `write()` または
 `fsync()` / `fdatasync()` を実行します。この非 `io_uring` 経路の
 syscall 実行中にはブロッキングが発生する可能性があります。
 seek は対応する `io_uring` submission がないため、queued `lseek()` として実装されています。
+
+### Win32 File I/O Helper
+
+Win32 backend では、`libbounce/win32.h` 経由で同じ形の file helper を利用できます。
+
+- C API:
+  `bounce_await_file_read()`, `bounce_await_file_write()`,
+  `bounce_await_file_seek()`, `bounce_await_file_flush()`
+- C++ API:
+  `libbounce::file_io` の `read()`, `write()`, `seek()`, `flush()`
+- C++20 API:
+  `libbounce::read_async()`, `write_async()`, `seek_async()`,
+  `flush_async()`
+
+read/write は通常 `FILE_FLAG_OVERLAPPED` 付きで開いた Win32 file `HANDLE`
+を受け取り、明示的な非負 offset を必要とします。Win32 helper では
+overlapped I/O が `OVERLAPPED` 内の offset を使うため、
+`BOUNCE_FILE_OFFSET_CURRENT` は使用できません。
+seek は parker 上で `SetFilePointerEx()` を実行し、flush は
+`FlushFileBuffers()` を実行します。Win32 では `BOUNCE_FILE_FLUSH_DATA` は
+`BOUNCE_FILE_FLUSH_FULL` と同じ動作にマップされます。
 
 ### POSIX Socket I/O Helper
 

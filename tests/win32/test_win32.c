@@ -21,6 +21,7 @@ extern void test_cpp_wrapper_lambda_post_aborts_on_deinit(void);
 extern void test_cpp_wrapper_timer_await_runs(void);
 extern void test_cpp_wrapper_lambda_timer_await_runs(void);
 extern void test_cpp_wrapper_lambda_timer_await_aborts_on_deinit(void);
+extern void test_cpp_wrapper_file_io_runs(void);
 extern void test_cpp_wrapper_cancellation_cancel_timeout_runs(void);
 extern void test_cpp_wrapper_cancellation_precanceled_timeout_runs(void);
 extern void test_cpp_wrapper_registration_completes_canceled(void);
@@ -35,6 +36,8 @@ extern void test_cpp_wrapper_await_runs(void);
 extern void test_cpp_wrapper_lambda_await_runs(void);
 extern void test_cpp_wrapper_lambda_await_aborts_on_deinit(void);
 extern void test_win32_example_button_click_writes_sample_file(void);
+extern unsigned int test_file_header_c_compiles(void);
+extern bool test_file_header_cpp_compiles(void);
 
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
 extern void test_cpp_promise_resume_on_runs(void);
@@ -51,6 +54,7 @@ extern void test_cpp_promise_fire_and_forget_void_runs(void);
 extern void test_cpp_promise_fire_and_forget_value_runs(void);
 extern void test_cpp_promise_fire_and_forget_empty_fails(void);
 extern void test_cpp_promise_handle_await_runs(void);
+extern void test_cpp_promise_file_io_async_runs(void);
 #endif
 
 #if defined(_WIN64)
@@ -323,6 +327,64 @@ static void test_completion_context_deinit(TEST_COMPLETION_CONTEXT *context) {
     CloseHandle(context->done_event);
     context->done_event = NULL;
   }
+}
+
+static HANDLE test_open_temporary_overlapped_file(void) {
+  wchar_t directory[MAX_PATH];
+  wchar_t path[MAX_PATH];
+  HANDLE handle;
+
+  ASSERT_TRUE(GetTempPathW((DWORD)(sizeof directory / sizeof directory[0]), directory) > 0u);
+  ASSERT_TRUE(GetTempFileNameW(directory, L"lbf", 0u, path) != 0u);
+  handle = CreateFileW(
+    path,
+    GENERIC_READ | GENERIC_WRITE,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    NULL,
+    CREATE_ALWAYS,
+    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+    NULL);
+  ASSERT_TRUE(handle != INVALID_HANDLE_VALUE);
+  return handle;
+}
+
+static void test_open_connected_overlapped_pipe(
+  HANDLE *server_handle,
+  HANDLE *client_handle) {
+  char pipe_name[128];
+  BOOL connect_result;
+
+  ASSERT_TRUE(
+    snprintf(
+      pipe_name,
+      sizeof pipe_name,
+      "\\\\.\\pipe\\libbounce-file-%lu-%lu",
+      (unsigned long)GetCurrentProcessId(),
+      (unsigned long)GetTickCount()) > 0);
+
+  *server_handle = CreateNamedPipeA(
+    pipe_name,
+    PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+    1u,
+    4096u,
+    4096u,
+    0u,
+    NULL);
+  ASSERT_TRUE(*server_handle != INVALID_HANDLE_VALUE);
+
+  *client_handle = CreateFileA(
+    pipe_name,
+    GENERIC_WRITE,
+    0u,
+    NULL,
+    OPEN_EXISTING,
+    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+    NULL);
+  ASSERT_TRUE(*client_handle != INVALID_HANDLE_VALUE);
+
+  connect_result = ConnectNamedPipe(*server_handle, NULL);
+  ASSERT_TRUE(connect_result || (GetLastError() == ERROR_PIPE_CONNECTED));
 }
 
 static void test_assert_completion_on_current_thread(
@@ -823,6 +885,155 @@ static void test_single_await_runs(void) {
   test_stop_parkers(&bounce, &park_thread, &thread_handle, 1u);
   CloseHandle(event_handle);
   test_completion_context_deinit(&completion);
+  bounce_deinit(&bounce);
+}
+
+static void test_file_header_c_compiles_case(void) {
+  ASSERT_TRUE(test_file_header_c_compiles() > 0u);
+}
+
+static void test_file_header_cpp_compiles_case(void) {
+  ASSERT_TRUE(test_file_header_cpp_compiles());
+}
+
+static void test_file_read_write_seek_flush_await_runs(void) {
+  static const char payload[] = "libbounce Win32 file helper payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_thread;
+  TEST_COMPLETION_CONTEXT completion;
+  HANDLE thread_handle;
+  HANDLE file_handle = test_open_temporary_overlapped_file();
+  char buffer[sizeof payload];
+
+  memset(&buffer[0], 0, sizeof buffer);
+  bounce_init(&bounce);
+  bounce_file_io_init(&operation);
+  test_completion_context_init(&completion);
+  thread_handle = test_start_parker(&bounce, &park_thread);
+
+  ASSERT_TRUE(bounce_await_file_write(
+    &bounce,
+    &operation,
+    file_handle,
+    &payload[0],
+    0,
+    sizeof payload,
+    test_await_completion,
+    &completion,
+    NULL));
+  ASSERT_TRUE(WaitForSingleObject(completion.done_event, TEST_TIMEOUT_MS) == WAIT_OBJECT_0);
+  ASSERT_TRUE(completion.call_count == 1);
+  ASSERT_TRUE(completion.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(completion.callback_thread_id == park_thread.thread_id);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+
+  test_completion_context_deinit(&completion);
+  test_completion_context_init(&completion);
+  ASSERT_TRUE(bounce_await_file_flush(
+    &bounce,
+    &operation,
+    file_handle,
+    BOUNCE_FILE_FLUSH_FULL,
+    test_await_completion,
+    &completion,
+    NULL));
+  ASSERT_TRUE(WaitForSingleObject(completion.done_event, TEST_TIMEOUT_MS) == WAIT_OBJECT_0);
+  ASSERT_TRUE(completion.call_count == 1);
+  ASSERT_TRUE(completion.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(completion.callback_thread_id == park_thread.thread_id);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == 0);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+
+  test_completion_context_deinit(&completion);
+  test_completion_context_init(&completion);
+  ASSERT_TRUE(bounce_await_file_seek(
+    &bounce,
+    &operation,
+    file_handle,
+    0,
+    FILE_BEGIN,
+    test_await_completion,
+    &completion,
+    NULL));
+  ASSERT_TRUE(WaitForSingleObject(completion.done_event, TEST_TIMEOUT_MS) == WAIT_OBJECT_0);
+  ASSERT_TRUE(completion.call_count == 1);
+  ASSERT_TRUE(completion.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(completion.callback_thread_id == park_thread.thread_id);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == 0);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+
+  test_completion_context_deinit(&completion);
+  test_completion_context_init(&completion);
+  ASSERT_TRUE(bounce_await_file_read(
+    &bounce,
+    &operation,
+    file_handle,
+    &buffer[0],
+    0,
+    sizeof buffer,
+    test_await_completion,
+    &completion,
+    NULL));
+  ASSERT_TRUE(WaitForSingleObject(completion.done_event, TEST_TIMEOUT_MS) == WAIT_OBJECT_0);
+  ASSERT_TRUE(completion.call_count == 1);
+  ASSERT_TRUE(completion.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(completion.callback_thread_id == park_thread.thread_id);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+
+  test_stop_parkers(&bounce, &park_thread, &thread_handle, 1u);
+  test_completion_context_deinit(&completion);
+  bounce_file_io_deinit(&operation);
+  CloseHandle(file_handle);
+  bounce_deinit(&bounce);
+}
+
+static void test_file_read_await_cancel_completes_canceled(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  BOUNCE_CANCELLATION cancellation;
+  TEST_PARK_THREAD_CONTEXT park_thread;
+  TEST_COMPLETION_CONTEXT completion;
+  HANDLE thread_handle;
+  HANDLE server_handle;
+  HANDLE client_handle;
+  unsigned char byte = 0u;
+
+  test_open_connected_overlapped_pipe(&server_handle, &client_handle);
+  bounce_init(&bounce);
+  bounce_file_io_init(&operation);
+  bounce_cancellation_init(&cancellation);
+  test_completion_context_init(&completion);
+  thread_handle = test_start_parker(&bounce, &park_thread);
+
+  ASSERT_TRUE(bounce_await_file_read(
+    &bounce,
+    &operation,
+    server_handle,
+    &byte,
+    0,
+    sizeof byte,
+    test_await_completion,
+    &completion,
+    &cancellation));
+  bounce_cancel(&bounce, &cancellation);
+  ASSERT_TRUE(WaitForSingleObject(completion.done_event, TEST_TIMEOUT_MS) == WAIT_OBJECT_0);
+
+  ASSERT_TRUE(completion.call_count == 1);
+  ASSERT_TRUE(completion.result == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(completion.callback_thread_id == park_thread.thread_id);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == -1);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == ERROR_OPERATION_ABORTED);
+
+  test_stop_parkers(&bounce, &park_thread, &thread_handle, 1u);
+  test_completion_context_deinit(&completion);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_file_io_deinit(&operation);
+  CloseHandle(client_handle);
+  CloseHandle(server_handle);
   bounce_deinit(&bounce);
 }
 
@@ -1633,6 +1844,8 @@ int main(void) {
     TEST_CASE_ENTRY(test_tls_current_core_uses_fallback_when_unattached),
     TEST_CASE_ENTRY(test_tls_current_core_visible_on_attached_parker),
     TEST_CASE_ENTRY(test_park_pumps_window_messages),
+    TEST_CASE_ENTRY(test_file_header_c_compiles_case),
+    TEST_CASE_ENTRY(test_file_header_cpp_compiles_case),
     TEST_CASE_ENTRY(test_single_post_runs),
     TEST_CASE_ENTRY(test_park_once_post_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_post_runs),
@@ -1643,6 +1856,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_set_default_overrides_fallback_view),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_timer_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_timer_await_aborts_on_deinit),
+    TEST_CASE_ENTRY(test_cpp_wrapper_file_io_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_cancellation_cancel_timeout_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_cancellation_precanceled_timeout_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_completes_canceled),
@@ -1670,11 +1884,14 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_value_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_empty_fails),
     TEST_CASE_ENTRY(test_cpp_promise_handle_await_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_file_io_async_runs),
 #endif
     TEST_CASE_ENTRY(test_park_once_returns_before_timeout_completion),
     TEST_CASE_ENTRY(test_park_once_nested_post_inlines),
     TEST_CASE_ENTRY(test_park_once_nested_post_falls_back_at_depth_limit),
     TEST_CASE_ENTRY(test_single_await_runs),
+    TEST_CASE_ENTRY(test_file_read_write_seek_flush_await_runs),
+    TEST_CASE_ENTRY(test_file_read_await_cancel_completes_canceled),
     TEST_CASE_ENTRY(test_single_timeout_runs),
     TEST_CASE_ENTRY(test_post_then_await_order),
     TEST_CASE_ENTRY(test_nested_post_inline_depth_benchmark),

@@ -222,6 +222,9 @@ extern bool bounce_await_socket_sendmsg(
 #ifdef __cplusplus
 namespace libbounce {
 
+class bounce;
+class bounce_ref;
+
 /**
  * @brief Caller-owned socket I/O operation storage for the C++ helper API.
  * @tparam TBOUNCE_CORE Backend bounce core storage type.

@@ -75,6 +75,7 @@ extern "C" {
 #endif
 
 typedef struct __BOUNCE_WIN32_WAITER __BOUNCE_WIN32_WAITER;
+typedef HANDLE BOUNCE_FILE_HANDLE;
 
 /**
  * @brief Completion item stored in static bounce pools.
@@ -160,6 +161,37 @@ struct BOUNCE_TIMER {
   volatile LONG abort_requested;
 };
 
+/**
+ * @brief Caller-owned file I/O helper operation.
+ * @remarks Read and write operations use Win32 overlapped I/O. Seek and flush
+ * are queued onto a parked thread because Win32 exposes them as synchronous
+ * file operations.
+ */
+struct BOUNCE_FILE_IO {
+  CRITICAL_SECTION lock;
+  BOUNCE_CANCELLATION_REGISTRATION cancellation_registration;
+  OVERLAPPED overlapped;
+  HANDLE event_handle;
+  BOUNCE_CORE *bounce;
+  BOUNCE_COMPLETION completion;
+  void *completion_state;
+  HANDLE handle;
+  void *buffer;
+  const void *const_buffer;
+  int64_t offset;
+  size_t length;
+  int whence;
+  BOUNCE_FILE_FLUSH_MODE flush_mode;
+  int operation;
+  int64_t result;
+  int error_code;
+  bool active;
+  bool cancellation_registration_active;
+  bool io_pending;
+  bool cancel_requested;
+  bool settling;
+};
+
 //////////////////////////////////////////////////////////////////////////////////
 
 /**
@@ -175,6 +207,143 @@ struct BOUNCE_TIMER {
  */
 extern void bounce_await_win32_handle(BOUNCE_CORE *r,
   HANDLE handle,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Initialize a file I/O operation.
+ * @param operation File I/O operation storage provided by the caller.
+ * @remarks Only one operation may be active per storage object.
+ */
+extern void bounce_file_io_init(BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Deinitialize a file I/O operation.
+ * @param operation File I/O operation storage provided by the caller.
+ * @remarks The operation must not be active when this function is called.
+ */
+extern void bounce_file_io_deinit(BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Get the file I/O operation result.
+ * @param operation Initialized file I/O operation storage.
+ * @return Bytes read/written, the resulting seek offset, zero for successful
+ * flush, or -1 when the underlying operation reported an error.
+ */
+extern int64_t bounce_file_io_result(const BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Get the file I/O operation error code.
+ * @param operation Initialized file I/O operation storage.
+ * @return Win32 `GetLastError()` value. Returns zero when the operation result
+ * is not an error.
+ */
+extern int bounce_file_io_error(const BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Check whether a file I/O operation is currently active.
+ * @param operation Initialized file I/O operation storage.
+ * @return True when an operation is active.
+ */
+extern bool bounce_file_io_active(const BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Await a Win32 overlapped file read operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to read.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Win32 overlapped file I/O requires an explicit offset. Passing
+ * `BOUNCE_FILE_OFFSET_CURRENT` is rejected.
+ */
+extern bool bounce_await_file_read(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Await a Win32 overlapped file write operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to write.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Win32 overlapped file I/O requires an explicit offset. Passing
+ * `BOUNCE_FILE_OFFSET_CURRENT` is rejected.
+ */
+extern bool bounce_await_file_write(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Await a Win32 file seek operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param handle File handle to seek.
+ * @param offset Offset passed to `SetFilePointerEx()`.
+ * @param whence Seek base passed to `SetFilePointerEx()`.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Seek is queued onto a parked thread and executes
+ * `SetFilePointerEx()`. Cancellation can win before that queued operation
+ * starts.
+ */
+extern bool bounce_await_file_seek(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Await a Win32 file flush operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param handle File handle to flush.
+ * @param mode Full metadata flush or data-only flush. Win32 maps both modes
+ * to `FlushFileBuffers()`.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Flush is queued onto a parked thread and executes
+ * `FlushFileBuffers()`.
+ */
+extern bool bounce_await_file_flush(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode,
   BOUNCE_COMPLETION completion,
   void *completion_state,
   BOUNCE_CANCELLATION *cancellation);
@@ -386,6 +555,219 @@ public:
     BOUNCE_CANCELLATION *cancellation) noexcept;
 #endif
 };
+
+/**
+ * @brief Caller-owned file I/O operation storage for the C++ helper API.
+ */
+class file_io :
+  public file_io_base<BOUNCE_CORE, BOUNCE_FILE_IO, BOUNCE_FILE_HANDLE> {
+public:
+  /**
+   * @brief Initialize the file I/O operation.
+   */
+  inline file_io() noexcept: file_io_base() {
+  }
+
+  /**
+   * @brief Deinitialize the file I/O operation.
+   */
+  ~file_io() = default;
+};
+
+#if LIBBOUNCE_HAS_COROUTINE_SUPPORT
+/**
+ * @brief Await a Win32 file read operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to read.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> read_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file read operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to read.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> read_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file read operation through the current or fallback bounce.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to read.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> read_async(
+  BOUNCE_FILE_HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file write operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to write.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> write_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file write operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to write.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> write_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file write operation through the current or fallback bounce.
+ * @param handle File handle opened with `FILE_FLAG_OVERLAPPED`.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset.
+ * @param length Maximum bytes to write.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> write_async(
+  BOUNCE_FILE_HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file seek operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File handle to seek.
+ * @param offset Offset passed to `SetFilePointerEx()`.
+ * @param whence Seek base passed to `SetFilePointerEx()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> seek_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file seek operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File handle to seek.
+ * @param offset Offset passed to `SetFilePointerEx()`.
+ * @param whence Seek base passed to `SetFilePointerEx()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> seek_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file seek operation through the current or fallback bounce.
+ * @param handle File handle to seek.
+ * @param offset Offset passed to `SetFilePointerEx()`.
+ * @param whence Seek base passed to `SetFilePointerEx()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> seek_async(
+  BOUNCE_FILE_HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file flush operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File handle to flush.
+ * @param mode Full metadata flush or data-only flush. Win32 maps both modes
+ * to `FlushFileBuffers()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> flush_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode = BOUNCE_FILE_FLUSH_FULL,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file flush operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File handle to flush.
+ * @param mode Full metadata flush or data-only flush. Win32 maps both modes
+ * to `FlushFileBuffers()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> flush_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode = BOUNCE_FILE_FLUSH_FULL,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a Win32 file flush operation through the current or fallback bounce.
+ * @param handle File handle to flush.
+ * @param mode Full metadata flush or data-only flush. Win32 maps both modes
+ * to `FlushFileBuffers()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> flush_async(
+  BOUNCE_FILE_HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode = BOUNCE_FILE_FLUSH_FULL,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+#endif
 
 /**
  * @brief Caller-owned backend-local timer storage for the C++ helper API.

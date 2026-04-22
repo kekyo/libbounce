@@ -28,6 +28,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include "shared/test_cpp_runtime.h"
 #include "libbounce/bounce.h"
 
@@ -349,8 +353,9 @@ static void test_signal_pipe_readable(const int *pipe_fds) {
 }
 #endif
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
-static int test_open_temporary_file(void);
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
+static BOUNCE_FILE_HANDLE test_open_temporary_file(void);
+static void test_close_temporary_file(BOUNCE_FILE_HANDLE handle);
 
 extern "C" void test_cpp_wrapper_file_io_runs(void) {
   static const char payload[] = "libbounce C++ file helper payload";
@@ -359,7 +364,14 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
   TEST_PARK_THREAD_CONTEXT park_context;
   TEST_COMPLETION_CONTEXT completion_context;
   char buffer[sizeof payload];
-  const int fd = test_open_temporary_file();
+  const BOUNCE_FILE_HANDLE file_handle = test_open_temporary_file();
+#if defined(_WIN32)
+  const int seek_whence = FILE_BEGIN;
+  const int64_t read_offset = 0;
+#else
+  const int seek_whence = SEEK_SET;
+  const int64_t read_offset = BOUNCE_FILE_OFFSET_CURRENT;
+#endif
 
   memset(&buffer[0], 0, sizeof buffer);
   test_start_parker(&bounce_instance, &park_context);
@@ -368,7 +380,7 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
   ASSERT_TRUE(
     operation.write(
       bounce_instance,
-      fd,
+      file_handle,
       &payload[0],
       0,
       sizeof payload,
@@ -388,7 +400,7 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
   ASSERT_TRUE(
     operation.flush(
       bounce_instance,
-      fd,
+      file_handle,
       BOUNCE_FILE_FLUSH_FULL,
       [&completion_context](BOUNCE_COMPLETION_RESULT result) {
         test_record_completion(&completion_context, result);
@@ -406,9 +418,9 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
   ASSERT_TRUE(
     operation.seek(
       bounce_instance,
-      fd,
+      file_handle,
       0,
-      SEEK_SET,
+      seek_whence,
       [&completion_context](BOUNCE_COMPLETION_RESULT result) {
         test_record_completion(&completion_context, result);
       },
@@ -425,9 +437,9 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
   ASSERT_TRUE(
     operation.read(
       bounce_instance,
-      fd,
+      file_handle,
       &buffer[0],
-      BOUNCE_FILE_OFFSET_CURRENT,
+      read_offset,
       sizeof buffer,
       [&completion_context](BOUNCE_COMPLETION_RESULT result) {
         test_record_completion(&completion_context, result);
@@ -443,9 +455,10 @@ extern "C" void test_cpp_wrapper_file_io_runs(void) {
   ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
 
   test_stop_parker(&bounce_instance, &park_context);
-  ASSERT_TRUE(close(fd) == 0);
+  test_close_temporary_file(file_handle);
 }
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 extern "C" void test_cpp_wrapper_socket_io_runs(void) {
   static const char payload[] = "libbounce C++ socket helper payload";
   libbounce::bounce bounce_instance;
@@ -506,8 +519,31 @@ extern "C" void test_cpp_wrapper_socket_io_runs(void) {
 }
 #endif
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
-static int test_open_temporary_file(void) {
+#if defined(_WIN32)
+static BOUNCE_FILE_HANDLE test_open_temporary_file(void) {
+  wchar_t directory[MAX_PATH];
+  wchar_t path[MAX_PATH];
+  HANDLE handle;
+
+  ASSERT_TRUE(GetTempPathW((DWORD)(sizeof directory / sizeof directory[0]), directory) > 0u);
+  ASSERT_TRUE(GetTempFileNameW(directory, L"lbf", 0u, path) != 0u);
+  handle = CreateFileW(
+    path,
+    GENERIC_READ | GENERIC_WRITE,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    NULL,
+    CREATE_ALWAYS,
+    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+    NULL);
+  ASSERT_TRUE(handle != INVALID_HANDLE_VALUE);
+  return handle;
+}
+
+static void test_close_temporary_file(BOUNCE_FILE_HANDLE handle) {
+  ASSERT_TRUE(CloseHandle(handle) != 0);
+}
+#else
+static BOUNCE_FILE_HANDLE test_open_temporary_file(void) {
   char path[] = "/tmp/libbounce_cpp_file_io_XXXXXX";
   const int fd = mkstemp(path);
 
@@ -515,6 +551,11 @@ static int test_open_temporary_file(void) {
   ASSERT_TRUE(unlink(path) == 0);
   return fd;
 }
+
+static void test_close_temporary_file(BOUNCE_FILE_HANDLE handle) {
+  ASSERT_TRUE(close(handle) == 0);
+}
+#endif
 #endif
 
 typedef struct TEST_CPP_INLINE_POST_CONTEXT {

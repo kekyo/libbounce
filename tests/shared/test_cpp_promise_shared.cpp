@@ -187,9 +187,38 @@ static void test_set_nonblocking(int fd) {
   ASSERT_TRUE(flags >= 0);
   ASSERT_TRUE(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
 }
+#endif
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
-static int test_open_temporary_file(void) {
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
+static BOUNCE_FILE_HANDLE test_open_temporary_file(void);
+static void test_close_temporary_file(BOUNCE_FILE_HANDLE handle);
+#endif
+
+#if defined(_WIN32)
+static BOUNCE_FILE_HANDLE test_open_temporary_file(void) {
+  wchar_t directory[MAX_PATH];
+  wchar_t path[MAX_PATH];
+  HANDLE handle;
+
+  ASSERT_TRUE(GetTempPathW((DWORD)(sizeof directory / sizeof directory[0]), directory) > 0u);
+  ASSERT_TRUE(GetTempFileNameW(directory, L"lbf", 0u, path) != 0u);
+  handle = CreateFileW(
+    path,
+    GENERIC_READ | GENERIC_WRITE,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    NULL,
+    CREATE_ALWAYS,
+    FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+    NULL);
+  ASSERT_TRUE(handle != INVALID_HANDLE_VALUE);
+  return handle;
+}
+
+static void test_close_temporary_file(BOUNCE_FILE_HANDLE handle) {
+  ASSERT_TRUE(CloseHandle(handle) != 0);
+}
+#elif defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+static BOUNCE_FILE_HANDLE test_open_temporary_file(void) {
   char path[] = "/tmp/libbounce_cpp20_file_io_XXXXXX";
   const int fd = mkstemp(path);
 
@@ -197,8 +226,13 @@ static int test_open_temporary_file(void) {
   ASSERT_TRUE(unlink(path) == 0);
   return fd;
 }
+
+static void test_close_temporary_file(BOUNCE_FILE_HANDLE handle) {
+  ASSERT_TRUE(close(handle) == 0);
+}
 #endif
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static size_t test_fill_pipe_until_would_block(int fd) {
   std::array<unsigned char, 4096u> buffer {};
   size_t total = 0u;
@@ -574,18 +608,25 @@ static libbounce::promise<void> test_fd_write_all_bytes_coroutine(
 }
 #endif
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
 static libbounce::promise<void> test_file_io_async_coroutine(
-  int fd,
+  BOUNCE_FILE_HANDLE file_handle,
   TEST_COMPLETION_CONTEXT *completion_context) {
   static const char payload[] = "libbounce C++20 file helper payload";
   char buffer[sizeof payload];
+#if defined(_WIN32)
+  const int seek_whence = FILE_BEGIN;
+  const int64_t read_offset = 0;
+#else
+  const int seek_whence = SEEK_SET;
+  const int64_t read_offset = BOUNCE_FILE_OFFSET_CURRENT;
+#endif
 
   memset(&buffer[0], 0, sizeof buffer);
 
   const libbounce::file_io_result write_result =
     co_await libbounce::write_async(
-      fd,
+      file_handle,
       &payload[0],
       0,
       sizeof payload,
@@ -595,7 +636,7 @@ static libbounce::promise<void> test_file_io_async_coroutine(
 
   const libbounce::file_io_result flush_result =
     co_await libbounce::flush_async(
-      fd,
+      file_handle,
       BOUNCE_FILE_FLUSH_FULL,
       NULL);
   ASSERT_TRUE(flush_result.succeeded());
@@ -603,18 +644,18 @@ static libbounce::promise<void> test_file_io_async_coroutine(
 
   const libbounce::file_io_result seek_result =
     co_await libbounce::seek_async(
-      fd,
+      file_handle,
       0,
-      SEEK_SET,
+      seek_whence,
       NULL);
   ASSERT_TRUE(seek_result.succeeded());
   ASSERT_TRUE(seek_result.result == 0);
 
   const libbounce::file_io_result read_result =
     co_await libbounce::read_async(
-      fd,
+      file_handle,
       &buffer[0],
-      BOUNCE_FILE_OFFSET_CURRENT,
+      read_offset,
       sizeof buffer,
       NULL);
   ASSERT_TRUE(read_result.succeeded());
@@ -623,7 +664,9 @@ static libbounce::promise<void> test_file_io_async_coroutine(
 
   test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
 }
+#endif
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 static libbounce::promise<void> test_socket_io_async_coroutine(
   const int *socket_fds,
   TEST_COMPLETION_CONTEXT *completion_context) {
@@ -1037,15 +1080,16 @@ extern "C" void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_run
   test_stop_parker(&bounce_instance, &park_context);
   test_close_pipe(pipe_fds);
 }
+#endif
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
 extern "C" void test_cpp_promise_file_io_async_runs(void) {
   libbounce::bounce bounce_instance;
   TEST_PARK_THREAD_CONTEXT park_context;
   TEST_COMPLETION_CONTEXT completion_context;
-  const int fd = test_open_temporary_file();
+  const BOUNCE_FILE_HANDLE file_handle = test_open_temporary_file();
   auto coroutine = test_file_io_async_coroutine(
-    fd,
+    file_handle,
     &completion_context);
 
   test_completion_context_init(&completion_context);
@@ -1057,9 +1101,11 @@ extern "C" void test_cpp_promise_file_io_async_runs(void) {
   test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
   test_stop_parker(&bounce_instance, &park_context);
   bounce_set_fallback_core(NULL);
-  ASSERT_TRUE(close(fd) == 0);
+  test_close_temporary_file(file_handle);
 }
+#endif
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 extern "C" void test_cpp_promise_socket_io_async_runs(void) {
   libbounce::bounce bounce_instance;
   TEST_PARK_THREAD_CONTEXT park_context;
@@ -1135,7 +1181,6 @@ extern "C" void test_cpp_promise_io_uring_await_canceled_runs(void) {
   test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
   test_stop_parker(&bounce_instance, &park_context);
 }
-#endif
 #endif
 
 #if defined(_WIN32)

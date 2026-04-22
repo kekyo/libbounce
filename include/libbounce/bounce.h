@@ -247,7 +247,11 @@ struct file_io_result;
 struct socket_io_result;
 
 template <typename TBOUNCE_CORE> class bounce_base;
-template <typename TBOUNCE_CORE, typename TBOUNCE_FILE_IO> class file_io_base;
+template <
+  typename TBOUNCE_CORE,
+  typename TBOUNCE_FILE_IO,
+  typename THANDLE>
+class file_io_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_SOCKET_IO> class socket_io_base;
 template <typename TBOUNCE_CORE, typename TBOUNCE_TIMER> class timer_base;
 template <typename TBOUNCE_CORE> class bounce_base_ref;

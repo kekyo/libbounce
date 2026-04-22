@@ -76,11 +76,11 @@ struct await_result {
   }
 };
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
 /**
  * @brief Result returned from coroutine file I/O helpers.
  * @remarks The await state reports helper completion. The syscall-level result
- * is stored in @ref result and @ref error_code so POSIX errors can be reported
+ * is stored in @ref result and @ref error_code so native errors can be reported
  * without treating them as libbounce infrastructure aborts.
  */
 struct file_io_result {
@@ -97,7 +97,7 @@ struct file_io_result {
    * @brief Create a file I/O result.
    * @param await_result_ Await completion state.
    * @param result_ Bytes, seek offset, flush result, or -1.
-   * @param error_code_ POSIX errno value, or zero.
+   * @param error_code_ Backend native error code, or zero.
    */
   inline file_io_result(
     await_result await_result_,
@@ -149,7 +149,9 @@ struct file_io_result {
     return completed() && (error_code == 0) && (result >= 0);
   }
 };
+#endif
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 /**
  * @brief Result returned from coroutine socket I/O helpers.
  * @remarks The await state reports helper completion. The syscall-level result
@@ -1712,7 +1714,7 @@ inline await_operation bounce::await(
 
 #endif
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
 namespace detail {
 
 template<typename START_FN>
@@ -1731,7 +1733,7 @@ static inline await_operation make_file_awaitable_core(
 struct file_read_start {
   BOUNCE_CORE *core;
   BOUNCE_FILE_IO *operation;
-  int fd;
+  BOUNCE_FILE_HANDLE handle;
   void *buffer;
   int64_t offset;
   size_t length;
@@ -1743,7 +1745,7 @@ struct file_read_start {
     return ::bounce_await_file_read(
       core,
       operation,
-      fd,
+      handle,
       buffer,
       offset,
       length,
@@ -1756,7 +1758,7 @@ struct file_read_start {
 struct file_write_start {
   BOUNCE_CORE *core;
   BOUNCE_FILE_IO *operation;
-  int fd;
+  BOUNCE_FILE_HANDLE handle;
   const void *buffer;
   int64_t offset;
   size_t length;
@@ -1768,7 +1770,7 @@ struct file_write_start {
     return ::bounce_await_file_write(
       core,
       operation,
-      fd,
+      handle,
       buffer,
       offset,
       length,
@@ -1781,7 +1783,7 @@ struct file_write_start {
 struct file_seek_start {
   BOUNCE_CORE *core;
   BOUNCE_FILE_IO *operation;
-  int fd;
+  BOUNCE_FILE_HANDLE handle;
   int64_t offset;
   int whence;
 
@@ -1792,7 +1794,7 @@ struct file_seek_start {
     return ::bounce_await_file_seek(
       core,
       operation,
-      fd,
+      handle,
       offset,
       whence,
       completion,
@@ -1804,7 +1806,7 @@ struct file_seek_start {
 struct file_flush_start {
   BOUNCE_CORE *core;
   BOUNCE_FILE_IO *operation;
-  int fd;
+  BOUNCE_FILE_HANDLE handle;
   BOUNCE_FILE_FLUSH_MODE mode;
 
   inline bool operator()(
@@ -1814,7 +1816,7 @@ struct file_flush_start {
     return ::bounce_await_file_flush(
       core,
       operation,
-      fd,
+      handle,
       mode,
       completion,
       completion_state,
@@ -1824,7 +1826,7 @@ struct file_flush_start {
 
 static inline promise<file_io_result> file_read_async_core(
   BOUNCE_CORE *core,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   void *buffer,
   int64_t offset,
   size_t length,
@@ -1836,7 +1838,7 @@ static inline promise<file_io_result> file_read_async_core(
       file_read_start {
         core,
         operation.get_file_io(),
-        fd,
+        handle,
         buffer,
         offset,
         length },
@@ -1850,7 +1852,7 @@ static inline promise<file_io_result> file_read_async_core(
 
 static inline promise<file_io_result> file_write_async_core(
   BOUNCE_CORE *core,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   const void *buffer,
   int64_t offset,
   size_t length,
@@ -1862,7 +1864,7 @@ static inline promise<file_io_result> file_write_async_core(
       file_write_start {
         core,
         operation.get_file_io(),
-        fd,
+        handle,
         buffer,
         offset,
         length },
@@ -1876,7 +1878,7 @@ static inline promise<file_io_result> file_write_async_core(
 
 static inline promise<file_io_result> file_seek_async_core(
   BOUNCE_CORE *core,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   int64_t offset,
   int whence,
   BOUNCE_CANCELLATION *cancellation) {
@@ -1887,7 +1889,7 @@ static inline promise<file_io_result> file_seek_async_core(
       file_seek_start {
         core,
         operation.get_file_io(),
-        fd,
+        handle,
         offset,
         whence },
       cancellation);
@@ -1900,7 +1902,7 @@ static inline promise<file_io_result> file_seek_async_core(
 
 static inline promise<file_io_result> file_flush_async_core(
   BOUNCE_CORE *core,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   BOUNCE_FILE_FLUSH_MODE mode,
   BOUNCE_CANCELLATION *cancellation) {
   file_io operation;
@@ -1910,7 +1912,7 @@ static inline promise<file_io_result> file_flush_async_core(
       file_flush_start {
         core,
         operation.get_file_io(),
-        fd,
+        handle,
         mode },
       cancellation);
 
@@ -1919,6 +1921,12 @@ static inline promise<file_io_result> file_flush_async_core(
     operation.result(),
     operation.error());
 }
+
+}  // namespace detail
+#endif
+
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
+namespace detail {
 
 template<typename START_FN>
 static inline await_operation make_socket_awaitable_core(
@@ -2248,17 +2256,19 @@ static inline promise<socket_io_result> socket_send_msg_async_core(
 }
 
 }  // namespace detail
+#endif
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(_WIN32)
 inline promise<file_io_result> read_async(
   bounce &bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   void *buffer,
   int64_t offset,
   size_t length,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_read_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     buffer,
     offset,
     length,
@@ -2267,14 +2277,14 @@ inline promise<file_io_result> read_async(
 
 inline promise<file_io_result> read_async(
   bounce_ref bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   void *buffer,
   int64_t offset,
   size_t length,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_read_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     buffer,
     offset,
     length,
@@ -2282,14 +2292,14 @@ inline promise<file_io_result> read_async(
 }
 
 inline promise<file_io_result> read_async(
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   void *buffer,
   int64_t offset,
   size_t length,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_read_async_core(
     ::bounce_get_core(),
-    fd,
+    handle,
     buffer,
     offset,
     length,
@@ -2298,14 +2308,14 @@ inline promise<file_io_result> read_async(
 
 inline promise<file_io_result> write_async(
   bounce &bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   const void *buffer,
   int64_t offset,
   size_t length,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_write_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     buffer,
     offset,
     length,
@@ -2314,14 +2324,14 @@ inline promise<file_io_result> write_async(
 
 inline promise<file_io_result> write_async(
   bounce_ref bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   const void *buffer,
   int64_t offset,
   size_t length,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_write_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     buffer,
     offset,
     length,
@@ -2329,14 +2339,14 @@ inline promise<file_io_result> write_async(
 }
 
 inline promise<file_io_result> write_async(
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   const void *buffer,
   int64_t offset,
   size_t length,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_write_async_core(
     ::bounce_get_core(),
-    fd,
+    handle,
     buffer,
     offset,
     length,
@@ -2345,13 +2355,13 @@ inline promise<file_io_result> write_async(
 
 inline promise<file_io_result> seek_async(
   bounce &bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   int64_t offset,
   int whence,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_seek_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     offset,
     whence,
     cancellation);
@@ -2359,26 +2369,26 @@ inline promise<file_io_result> seek_async(
 
 inline promise<file_io_result> seek_async(
   bounce_ref bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   int64_t offset,
   int whence,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_seek_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     offset,
     whence,
     cancellation);
 }
 
 inline promise<file_io_result> seek_async(
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   int64_t offset,
   int whence,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_seek_async_core(
     ::bounce_get_core(),
-    fd,
+    handle,
     offset,
     whence,
     cancellation);
@@ -2386,39 +2396,41 @@ inline promise<file_io_result> seek_async(
 
 inline promise<file_io_result> flush_async(
   bounce &bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   BOUNCE_FILE_FLUSH_MODE mode,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_flush_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     mode,
     cancellation);
 }
 
 inline promise<file_io_result> flush_async(
   bounce_ref bounce_handle,
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   BOUNCE_FILE_FLUSH_MODE mode,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_flush_async_core(
     bounce_handle.get_core(),
-    fd,
+    handle,
     mode,
     cancellation);
 }
 
 inline promise<file_io_result> flush_async(
-  int fd,
+  BOUNCE_FILE_HANDLE handle,
   BOUNCE_FILE_FLUSH_MODE mode,
   BOUNCE_CANCELLATION *cancellation) {
   return detail::file_flush_async_core(
     ::bounce_get_core(),
-    fd,
+    handle,
     mode,
     cancellation);
 }
+#endif
 
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB)
 inline promise<socket_io_result> recv_async(
   bounce &bounce_handle,
   int fd,

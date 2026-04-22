@@ -102,6 +102,7 @@ typedef struct BOUNCE_POSIX_IO_URING_OP {
 
 typedef struct BOUNCE_POSIX_CONDITION BOUNCE_POSIX_CONDITION;
 typedef struct __BOUNCE_POSIX_WAITER __BOUNCE_POSIX_WAITER;
+typedef int BOUNCE_FILE_HANDLE;
 
 /**
  * @brief Completion item stored in static bounce pools.
@@ -329,6 +330,148 @@ extern void bounce_await_posix_fd(
   BOUNCE_CORE *r,
   int fd,
   short events,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Initialize a file I/O operation.
+ * @param operation File I/O operation storage provided by the caller.
+ * @remarks Only one operation may be active per storage object.
+ */
+extern void bounce_file_io_init(BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Deinitialize a file I/O operation.
+ * @param operation File I/O operation storage provided by the caller.
+ * @remarks The operation must not be active when this function is called.
+ */
+extern void bounce_file_io_deinit(BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Get the file I/O operation result.
+ * @param operation Initialized file I/O operation storage.
+ * @return Bytes read/written, the resulting seek offset, zero for successful
+ * flush, or -1 when the underlying operation reported an error.
+ */
+extern int64_t bounce_file_io_result(const BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Get the file I/O operation error code.
+ * @param operation Initialized file I/O operation storage.
+ * @return POSIX errno value. Returns zero when the operation result is not an
+ * error.
+ */
+extern int bounce_file_io_error(const BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Check whether a file I/O operation is currently active.
+ * @param operation Initialized file I/O operation storage.
+ * @return True when an operation is active.
+ */
+extern bool bounce_file_io_active(const BOUNCE_FILE_IO *operation);
+
+/**
+ * @brief Await a file read operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param fd File descriptor to read from.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to read.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Linux uses io_uring when the POSIX core initialized it
+ * successfully. Otherwise the fallback waits for fd readability through the
+ * backend and then runs `read()` / `pread()` on the parked thread. For regular
+ * files and other descriptors, that fallback syscall can still block while the
+ * operation is executing.
+ */
+extern bool bounce_await_file_read(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  int fd,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Await a file write operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param fd File descriptor to write to.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to write.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Linux uses io_uring when the POSIX core initialized it
+ * successfully. Otherwise the fallback waits for fd writability through the
+ * backend and then runs `write()` / `pwrite()` on the parked thread. For
+ * regular files and other descriptors, that fallback syscall can still block
+ * while the operation is executing.
+ */
+extern bool bounce_await_file_write(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  int fd,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Await a file seek operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param fd File descriptor to seek.
+ * @param offset Offset passed to `lseek()`.
+ * @param whence Seek base passed to `lseek()`.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks POSIX seek is queued onto the parked thread and then executes
+ * `lseek()`. Cancellation can win before that queued operation starts.
+ */
+extern bool bounce_await_file_seek(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  int fd,
+  int64_t offset,
+  int whence,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Await a file flush operation.
+ * @param r Initialized BOUNCE_CORE.
+ * @param operation Initialized file I/O operation storage.
+ * @param fd File descriptor to flush.
+ * @param mode Full metadata flush or data-only flush.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @return True when local setup succeeded.
+ * @remarks Linux uses io_uring fsync when the POSIX core initialized it
+ * successfully. Otherwise the fallback queues `fsync()` / `fdatasync()` onto
+ * the parked thread. That fallback syscall can block while executing.
+ */
+extern bool bounce_await_file_flush(
+  BOUNCE_CORE *r,
+  BOUNCE_FILE_IO *operation,
+  int fd,
+  BOUNCE_FILE_FLUSH_MODE mode,
   BOUNCE_COMPLETION completion,
   void *completion_state,
   BOUNCE_CANCELLATION *cancellation);
@@ -916,7 +1059,8 @@ public:
 /**
  * @brief Caller-owned file I/O operation storage for the C++ helper API.
  */
-class file_io : public file_io_base<BOUNCE_CORE, BOUNCE_FILE_IO> {
+class file_io :
+  public file_io_base<BOUNCE_CORE, BOUNCE_FILE_IO, BOUNCE_FILE_HANDLE> {
 public:
   /**
    * @brief Initialize the file I/O operation.
@@ -929,6 +1073,198 @@ public:
    */
   ~file_io() = default;
 };
+
+#if LIBBOUNCE_HAS_COROUTINE_SUPPORT
+/**
+ * @brief Await a file read operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File descriptor to read from.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to read.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> read_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file read operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File descriptor to read from.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to read.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> read_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file read operation through the current or fallback bounce.
+ * @param handle File descriptor to read from.
+ * @param buffer Destination buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to read.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> read_async(
+  BOUNCE_FILE_HANDLE handle,
+  void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file write operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File descriptor to write to.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to write.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> write_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file write operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File descriptor to write to.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to write.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> write_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file write operation through the current or fallback bounce.
+ * @param handle File descriptor to write to.
+ * @param buffer Source buffer.
+ * @param offset Non-negative file offset, or `BOUNCE_FILE_OFFSET_CURRENT`.
+ * @param length Maximum bytes to write.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> write_async(
+  BOUNCE_FILE_HANDLE handle,
+  const void *buffer,
+  int64_t offset,
+  size_t length,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file seek operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File descriptor to seek.
+ * @param offset Offset passed to `lseek()`.
+ * @param whence Seek base passed to `lseek()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> seek_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file seek operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File descriptor to seek.
+ * @param offset Offset passed to `lseek()`.
+ * @param whence Seek base passed to `lseek()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> seek_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file seek operation through the current or fallback bounce.
+ * @param handle File descriptor to seek.
+ * @param offset Offset passed to `lseek()`.
+ * @param whence Seek base passed to `lseek()`.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> seek_async(
+  BOUNCE_FILE_HANDLE handle,
+  int64_t offset,
+  int whence,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file flush operation inside a coroutine.
+ * @param bounce_handle Bounce handle used to publish the completion.
+ * @param handle File descriptor to flush.
+ * @param mode Full metadata flush or data-only flush.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> flush_async(
+  bounce &bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode = BOUNCE_FILE_FLUSH_FULL,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file flush operation through a non-owning bounce reference.
+ * @param bounce_handle Bounce reference used to publish the completion.
+ * @param handle File descriptor to flush.
+ * @param mode Full metadata flush or data-only flush.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> flush_async(
+  bounce_ref bounce_handle,
+  BOUNCE_FILE_HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode = BOUNCE_FILE_FLUSH_FULL,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+
+/**
+ * @brief Await a file flush operation through the current or fallback bounce.
+ * @param handle File descriptor to flush.
+ * @param mode Full metadata flush or data-only flush.
+ * @param cancellation Cancellation when provided.
+ * @return Promise resolving to the file I/O result.
+ */
+promise<file_io_result> flush_async(
+  BOUNCE_FILE_HANDLE handle,
+  BOUNCE_FILE_FLUSH_MODE mode = BOUNCE_FILE_FLUSH_FULL,
+  BOUNCE_CANCELLATION *cancellation = nullptr);
+#endif
 
 /**
  * @brief Caller-owned socket I/O operation storage for the C++ helper API.

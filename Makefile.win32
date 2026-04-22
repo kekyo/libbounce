@@ -11,13 +11,16 @@ THREAD_FLAGS :=
 SOURCES := \
 	src/win32/bounce_tls_win32.c \
 	src/win32/bounce_win32.c \
+	src/win32/bounce_win32_file.c \
 	src/win32/bounce_win32_timer.c
 TEST_SOURCES := \
 	tests/win32/test_win32.c \
+	tests/shared/test_file_header_shared.c \
 	tests/shared/test_timer_header_shared.c \
 	tests/win32/test_cpp_runtime_win32.cpp \
 	tests/win32/test_win32_example.cpp \
 	tests/shared/test_cpp_shared.cpp \
+	tests/shared/test_file_header_cpp_shared.cpp \
 	tests/shared/test_timer_header_cpp_shared.cpp \
 	tests/shared/test_cpp_promise_shared.cpp \
 	tests/test_harness.c
