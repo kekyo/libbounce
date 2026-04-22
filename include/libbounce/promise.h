@@ -411,6 +411,15 @@ static inline void promise_resume_continuation(
   BOUNCE_COMPLETION_RESULT result,
   void *completion_state) noexcept;
 
+template<typename T>
+static inline void promise_resume_shared_state_continuation(
+  BOUNCE_COMPLETION_RESULT result,
+  void *completion_state) noexcept;
+
+template<typename T>
+static inline void promise_schedule_continuation(
+  promise_shared_state<T> *state) noexcept;
+
 template<typename TPROMISE>
 struct promise_final_awaiter {
   inline bool await_ready() const noexcept {
@@ -436,15 +445,7 @@ struct promise_final_awaiter {
       return;
     }
 
-    if ((state->continuation_bounce_ != nullptr) &&
-        ::bounce_post(
-          state->continuation_bounce_,
-          &promise_resume_continuation<TPROMISE>,
-          state.get())) {
-      return;
-    }
-
-    state->continuation_.resume();
+    promise_schedule_continuation(state.get());
   }
 
   inline void await_resume() const noexcept {
@@ -457,6 +458,29 @@ static inline void promise_resume_continuation(
   void *completion_state) noexcept {
   auto *state =
     static_cast<typename TPROMISE::state_type *>(completion_state);
+
+  state->continuation_.resume();
+}
+
+template<typename T>
+static inline void promise_resume_shared_state_continuation(
+  BOUNCE_COMPLETION_RESULT /*result*/,
+  void *completion_state) noexcept {
+  auto *state = static_cast<promise_shared_state<T> *>(completion_state);
+
+  state->continuation_.resume();
+}
+
+template<typename T>
+static inline void promise_schedule_continuation(
+  promise_shared_state<T> *state) noexcept {
+  if ((state->continuation_bounce_ != nullptr) &&
+      ::bounce_post(
+        state->continuation_bounce_,
+        &promise_resume_shared_state_continuation<T>,
+        state)) {
+    return;
+  }
 
   state->continuation_.resume();
 }
@@ -504,18 +528,21 @@ public:
 
     state->continuation_ = continuation;
     state->continuation_bounce_ = ::bounce_get_core();
-    if (!state->started_.exchange(true, std::memory_order_acq_rel)) {
-      state->handle_.resume();
+    if (state->completed_.load(std::memory_order_acquire)) {
+      return false;
     }
-    state->start_returned_.store(1u, std::memory_order_release);
-    if (state->suspend_state_.compare_exchange_strong(
+    if (!state->suspend_state_.compare_exchange_strong(
       expected,
       1u,
       std::memory_order_acq_rel,
       std::memory_order_acquire)) {
-      return true;
+      return expected == 3u;
     }
-    return expected == 3u;
+    state->start_returned_.store(1u, std::memory_order_release);
+    if (!state->started_.exchange(true, std::memory_order_acq_rel)) {
+      state->handle_.resume();
+    }
+    return true;
   }
 
   inline T await_resume() {
@@ -571,18 +598,21 @@ public:
 
     state->continuation_ = continuation;
     state->continuation_bounce_ = ::bounce_get_core();
-    if (!state->started_.exchange(true, std::memory_order_acq_rel)) {
-      state->handle_.resume();
+    if (state->completed_.load(std::memory_order_acquire)) {
+      return false;
     }
-    state->start_returned_.store(1u, std::memory_order_release);
-    if (state->suspend_state_.compare_exchange_strong(
+    if (!state->suspend_state_.compare_exchange_strong(
       expected,
       1u,
       std::memory_order_acq_rel,
       std::memory_order_acquire)) {
-      return true;
+      return expected == 3u;
     }
-    return expected == 3u;
+    state->start_returned_.store(1u, std::memory_order_release);
+    if (!state->started_.exchange(true, std::memory_order_acq_rel)) {
+      state->handle_.resume();
+    }
+    return true;
   }
 
   inline void await_resume() {
@@ -678,20 +708,21 @@ private:
       unsigned int expected = 0u;
 
       continuation_ = continuation;
-      if (!start()) {
-        result_ = await_result { await_status::start_failed };
-        return false;
-      }
-
-      start_returned_.store(1u, std::memory_order_release);
-      if (suspend_state_.compare_exchange_strong(
+      if (!suspend_state_.compare_exchange_strong(
         expected,
         1u,
         std::memory_order_acq_rel,
         std::memory_order_acquire)) {
-        return true;
+        return expected == 3u;
       }
-      return expected == 3u;
+      start_returned_.store(1u, std::memory_order_release);
+      if (!start()) {
+        result_ = await_result { await_status::start_failed };
+        (void)suspend_state_.exchange(3u, std::memory_order_acq_rel);
+        return false;
+      }
+
+      return true;
     }
 
     inline await_result consume_result() noexcept {
@@ -709,7 +740,7 @@ private:
         const unsigned int previous =
           state->suspend_state_.exchange(3u, std::memory_order_acq_rel);
 
-        if ((previous == 0u) || (previous == 1u)) {
+        if (previous == 1u) {
           state->continuation_.resume();
         }
         return;
@@ -771,7 +802,7 @@ private:
     }
   };
 
-  std::unique_ptr<state_base> state_;
+  std::shared_ptr<state_base> state_;
   await_result immediate_result_;
 
   explicit inline await_operation(await_result immediate_result) noexcept
@@ -779,7 +810,7 @@ private:
       immediate_result_(immediate_result) {
   }
 
-  explicit inline await_operation(std::unique_ptr<state_base>&& state) noexcept
+  explicit inline await_operation(std::shared_ptr<state_base> state) noexcept
     : state_(std::move(state)),
       immediate_result_ { await_status::aborted } {
   }
@@ -810,12 +841,14 @@ public:
    * @return True when the coroutine should suspend.
    */
   inline bool await_suspend(std::coroutine_handle<> continuation) noexcept {
-    if (state_ == nullptr) {
+    auto state = state_;
+
+    if (state == nullptr) {
       return false;
     }
 
-    if (!state_->suspend(continuation)) {
-      immediate_result_ = state_->consume_result();
+    if (!state->suspend(continuation)) {
+      immediate_result_ = state->consume_result();
       state_.reset();
       return false;
     }
@@ -831,9 +864,9 @@ public:
       return immediate_result_;
     }
 
-    const await_result result = state_->consume_result();
+    auto state = std::move(state_);
+    const await_result result = state->consume_result();
 
-    state_.reset();
     return result;
   }
 
@@ -854,10 +887,9 @@ public:
 
     try {
       return await_operation(
-        std::unique_ptr<state_base>(
-          new state_type(
-            std::forward<START_FN>(start),
-            cancellation)));
+        std::make_shared<state_type>(
+          std::forward<START_FN>(start),
+          cancellation));
     } catch (...) {
       return from_immediate(await_result { await_status::start_failed });
     }

@@ -493,8 +493,7 @@ static gboolean bounce_posix_glib_ready_source_prepare(
   }
 
   (void)bounce_posix_glib_lock(&ready_source->bounce->lock);
-  ready = (ready_source->bounce->ready_queue.head != NULL) ||
-          bounce_posix_glib_should_exit_locked(ready_source->bounce);
+  ready = (ready_source->bounce->ready_queue.head != NULL);
   (void)bounce_posix_glib_unlock(&ready_source->bounce->lock);
   return ready;
 }
@@ -507,9 +506,17 @@ static gboolean bounce_posix_glib_ready_source_dispatch(
   GSource *source,
   GSourceFunc callback,
   gpointer user_data) {
-  (void)source;
+  BOUNCE_POSIX_GLIB_READY_SOURCE *ready_source =
+    (BOUNCE_POSIX_GLIB_READY_SOURCE *)source;
+
   (void)callback;
   (void)user_data;
+  if (ready_source->bounce == NULL) {
+    return G_SOURCE_CONTINUE;
+  }
+
+  while (bounce_posix_glib_dispatch_next_ready(ready_source->bounce, 0u)) {
+  }
   return G_SOURCE_CONTINUE;
 }
 

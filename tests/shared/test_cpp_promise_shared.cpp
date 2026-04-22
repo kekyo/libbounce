@@ -454,6 +454,22 @@ static libbounce::promise<int> test_nested_value_child_coroutine(
   co_return 42;
 }
 
+static libbounce::promise<int> test_immediate_value_child_coroutine(void) {
+  co_return 42;
+}
+
+static libbounce::promise<void> test_immediate_child_value_root_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  const libbounce::await_result result = co_await libbounce::resume_on(bounce_instance);
+  auto child = test_immediate_value_child_coroutine();
+  const int value = co_await child;
+
+  ASSERT_TRUE(result.completed());
+  ASSERT_TRUE(value == 42);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
 static libbounce::promise<void> test_nested_value_root_coroutine(
   libbounce::bounce &bounce_instance,
   TEST_COMPLETION_CONTEXT *completion_context) {
@@ -872,6 +888,23 @@ extern "C" void test_cpp_promise_nested_value_runs(void) {
   TEST_PARK_THREAD_CONTEXT park_context;
   TEST_COMPLETION_CONTEXT completion_context;
   auto coroutine = test_nested_value_root_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_immediate_child_value_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_immediate_child_value_root_coroutine(
     bounce_instance,
     &completion_context);
 

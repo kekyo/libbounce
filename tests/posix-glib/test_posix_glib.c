@@ -53,6 +53,7 @@ extern void test_cpp_promise_make_callback_promise_runs(void);
 extern void test_cpp_promise_make_callback_promise_void_runs(void);
 extern void test_cpp_promise_make_callback_promise_start_failed(void);
 extern void test_cpp_promise_nested_value_runs(void);
+extern void test_cpp_promise_immediate_child_value_runs(void);
 extern void test_cpp_promise_exception_propagates(void);
 extern void test_cpp_promise_await_canceled_runs(void);
 extern void test_cpp_promise_fire_and_forget_void_runs(void);
@@ -139,6 +140,11 @@ typedef struct TEST_EXTERNAL_CONTEXT_STATE {
   bool fired;
 } TEST_EXTERNAL_CONTEXT_STATE;
 
+typedef struct TEST_MAIN_LOOP_POST_CONTEXT {
+  GMainLoop *loop;
+  TEST_COMPLETION_CONTEXT completion;
+} TEST_MAIN_LOOP_POST_CONTEXT;
+
 static struct timespec test_deadline_after_ms(unsigned int timeout_ms) {
   struct timespec timeout;
 
@@ -192,6 +198,20 @@ static void test_current_core_completion(
 
   context->observed_bounce = bounce_get_core();
   test_completion_callback(result, &context->completion);
+}
+
+static void test_main_loop_post_completion(
+  BOUNCE_COMPLETION_RESULT result,
+  void *completion_state) {
+  TEST_MAIN_LOOP_POST_CONTEXT *context = completion_state;
+
+  test_completion_callback(result, &context->completion);
+  g_main_loop_quit(context->loop);
+}
+
+static gboolean test_main_loop_timeout(gpointer user_data) {
+  g_main_loop_quit((GMainLoop *)user_data);
+  return G_SOURCE_REMOVE;
 }
 
 static void test_completion_context_init(
@@ -570,6 +590,43 @@ static void test_park_once_post_runs(void) {
 
   test_completion_context_destroy(&completion_context);
   bounce_deinit(&bounce);
+}
+
+static void test_nested_main_loop_dispatches_ready_completion(void) {
+  BOUNCE_CORE bounce;
+  GMainContext *main_context;
+  GMainLoop *loop;
+  GSource *timeout_source;
+  TEST_MAIN_LOOP_POST_CONTEXT context;
+
+  memset(&context, 0, sizeof context);
+  main_context = g_main_context_new();
+  ASSERT_TRUE(main_context != NULL);
+  bounce_init_with_main_context(&bounce, main_context);
+  loop = g_main_loop_new(main_context, FALSE);
+  ASSERT_TRUE(loop != NULL);
+  context.loop = loop;
+  test_completion_context_init(&context.completion, NULL);
+
+  timeout_source = g_timeout_source_new(TEST_NO_COMPLETION_TIMEOUT_MS);
+  ASSERT_TRUE(timeout_source != NULL);
+  g_source_set_priority(timeout_source, G_PRIORITY_HIGH);
+  g_source_set_callback(timeout_source, test_main_loop_timeout, loop, NULL);
+  ASSERT_TRUE(g_source_attach(timeout_source, main_context) != 0u);
+
+  ASSERT_TRUE(bounce_post(&bounce, test_main_loop_post_completion, &context));
+  g_main_loop_run(loop);
+
+  test_assert_completion_on_current_thread(
+    &context.completion,
+    BOUNCE_COMPLETION_COMPLETED);
+
+  g_source_destroy(timeout_source);
+  g_source_unref(timeout_source);
+  test_completion_context_destroy(&context.completion);
+  g_main_loop_unref(loop);
+  bounce_deinit(&bounce);
+  g_main_context_unref(main_context);
 }
 
 static void test_park_once_returns_before_timeout_completion(void) {
@@ -1684,6 +1741,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_socket_io_runs),
     TEST_CASE_ENTRY(test_posix_glib_gtk3_example_button_click_writes_sample_file),
     TEST_CASE_ENTRY(test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file),
+    TEST_CASE_ENTRY(test_nested_main_loop_dispatches_ready_completion),
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
     TEST_CASE_ENTRY(test_cpp_promise_resume_on_runs),
     TEST_CASE_ENTRY(test_cpp_promise_make_awaitable_runs),
@@ -1693,6 +1751,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_make_callback_promise_void_runs),
     TEST_CASE_ENTRY(test_cpp_promise_make_callback_promise_start_failed),
     TEST_CASE_ENTRY(test_cpp_promise_nested_value_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_immediate_child_value_runs),
     TEST_CASE_ENTRY(test_cpp_promise_exception_propagates),
     TEST_CASE_ENTRY(test_cpp_promise_await_canceled_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_void_runs),
