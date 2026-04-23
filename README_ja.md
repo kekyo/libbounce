@@ -485,7 +485,7 @@ static libbounce::promise<void> session(
 - `libbounce::bounce_ref`:
   `bounce` 非所有参照です。現在スレッドにアタッチ済みの core を扱う用途に向きます。
 
-POSIX と FreeRTOS では、さらに `libbounce::condition` が利用できます。
+POSIX、POSIX+GLib、FreeRTOS では、さらに `libbounce::condition` が利用できます。
 
 最も単純な使い方は、Cの関数ポインタの代わりにラムダを渡すことです。
 
@@ -590,7 +590,7 @@ bounce.set_default();
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|なし|backend 固有 wait を持たない、単一 parker・busy spin 前提の汎用コア|
 |POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|`poll()` ベースで fd readiness を待つ。軽量な one-shot condition、file I/O helper、socket I/O helper も使える。Linux では one-shot の `io_uring` 登録も待機可能|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|`GMainContext` / `GSource` に統合して fd readiness を待つ。file/socket helper はその GLib 文脈を使う。Linux では `io_uring` 完了も同じ parked な GLib 文脈へ戻せる|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_condition()`, `bounce_posix_glib_condition_raise()`, `bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux限定 `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|`GMainContext` / `GSource` に統合して fd readiness を待つ。軽量な one-shot condition、file/socket helper はその GLib 文脈を使う。Linux では `io_uring` 完了も同じ parked な GLib 文脈へ戻せる|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|タスク文脈・ISR文脈の両方から condition を通知できる|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|`BOUNCE_FREERTOS_ENABLE_FD_AWAIT` 有効時のみ fd readiness を待つ|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`|イベントや waitable timer などの `HANDLE` を待つ。Win32 file `HANDLE` 向けの file I/O helper も利用できる|
@@ -656,7 +656,7 @@ C++ヘルパーは、バックエンドごとの公開ヘッダで利用しま�
 |:----|:----|
 |Generic|backend 固有の追加 wait はなし。`post()` と `libbounce::timer` を使う|
 |POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` の `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` の `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` の `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux限定 `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`; file `HANDLE` 向け `libbounce::file_io` の `read()` / `write()` / `seek()` / `flush()`|

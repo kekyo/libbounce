@@ -92,6 +92,15 @@ typedef struct BOUNCE_POSIX_IO_URING_OP {
 #endif
 
 typedef int BOUNCE_FILE_HANDLE;
+typedef struct BOUNCE_POSIX_GLIB_CONDITION BOUNCE_POSIX_GLIB_CONDITION;
+
+/**
+ * @brief Backend-local one-shot condition object for POSIX+GLib awaiting.
+ */
+struct BOUNCE_POSIX_GLIB_CONDITION {
+  pthread_mutex_t lock;
+  BOUNCE_LIST waiters;
+};
 
 /**
  * @brief Completion item stored in static bounce pools.
@@ -99,13 +108,15 @@ typedef int BOUNCE_FILE_HANDLE;
 typedef struct __BOUNCE_COMPLETION_ITEM {
   BOUNCE_NODE_ITEM ready_or_free_link;
   BOUNCE_LIST_ITEM cancellation_link;
+  BOUNCE_LIST_ITEM condition_link;
   volatile int state;
   BOUNCE_COMPLETION completion;
   void *completion_state;
   BOUNCE_COMPLETION_RESULT completion_result;
   BOUNCE_CORE *bounce;
   int fd;
-  GIOCondition condition;
+  GIOCondition fd_condition;
+  BOUNCE_POSIX_GLIB_CONDITION *condition;
   BOUNCE_CANCELLATION *cancellation;
   BOUNCE_CANCELLATION_REGISTRATION *registration_owner;
   GSource *source;
@@ -259,6 +270,39 @@ struct BOUNCE_CORE {
 extern void bounce_init_with_main_context(
   BOUNCE_CORE *r,
   GMainContext *main_context);
+
+/**
+ * @brief Initialize a backend-local POSIX+GLib condition object.
+ * @param condition Condition storage provided by the caller.
+ */
+extern void bounce_posix_glib_condition_init(
+  BOUNCE_POSIX_GLIB_CONDITION *condition);
+
+/**
+ * @brief Await a backend-local POSIX+GLib condition.
+ * @param r Initialized BOUNCE_CORE.
+ * @param condition Initialized condition object.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ * @remarks If capacity is exhausted, completion is forced with
+ * `BOUNCE_COMPLETION_ABORTED`.
+ */
+extern void bounce_await_posix_glib_condition(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_GLIB_CONDITION *condition,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
+
+/**
+ * @brief Raise a backend-local POSIX+GLib condition.
+ * @param r Initialized BOUNCE_CORE.
+ * @param condition Initialized condition object.
+ */
+extern void bounce_posix_glib_condition_raise(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_GLIB_CONDITION *condition);
 
 /**
  * @brief Await GLib-integrated file-descriptor readiness through `GSource`.
@@ -450,6 +494,42 @@ extern void bounce_await_posix_glib_io_uring_op(
 #ifdef __cplusplus
 namespace libbounce {
 
+/**
+ * @brief Caller-owned backend-local POSIX+GLib condition storage for the C++
+ * helper API.
+ */
+class condition {
+private:
+  BOUNCE_POSIX_GLIB_CONDITION condition_;
+  condition(const condition&) = delete;
+  condition(condition&&) = delete;
+  condition& operator=(const condition&) = delete;
+  condition& operator=(condition&&) = delete;
+
+public:
+  /**
+   * @brief Initialize the backend-local condition storage.
+   * @remarks The condition must outlive any pending awaits registered against
+   * it.
+   */
+  inline condition() noexcept {
+    ::bounce_posix_glib_condition_init(&condition_);
+  }
+
+  /**
+   * @brief Deinitialize the backend-local condition storage.
+   */
+  ~condition() = default;
+
+  /**
+   * @brief Get the underlying condition storage.
+   * @return Backend condition storage pointer.
+   */
+  inline BOUNCE_POSIX_GLIB_CONDITION *get_condition() noexcept {
+    return &condition_;
+  }
+};
+
 class bounce_ref : public bounce_base_ref<BOUNCE_CORE> {
 private:
   friend class bounce;
@@ -466,6 +546,88 @@ public:
    */
   explicit inline bounce_ref(const bounce_base_ref<BOUNCE_CORE>& reference) noexcept
     : bounce_base_ref(reference.get_core()) {
+  }
+
+  /**
+   * @brief Await a backend-local POSIX+GLib condition and continue on a parked
+   * thread.
+   * @param condition_instance Initialized backend-local condition.
+   * @param completion Completion callback entry point.
+   * @param completion_state User provided completion callback state.
+   * @param cancellation Cancellation when provided.
+   */
+  inline void wait(
+    condition &condition_instance,
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    ::bounce_await_posix_glib_condition(
+      this->get_core(),
+      condition_instance.get_condition(),
+      completion,
+      completion_state,
+      cancellation);
+  }
+
+  /**
+   * @brief Await a backend-local POSIX+GLib condition with a C++ callable
+   * completion.
+   * @tparam COMPLETION_TYPE Callable type. Must be invocable with no arguments
+   * or `BOUNCE_COMPLETION_RESULT`.
+   * @param condition_instance Initialized backend-local condition.
+   * @param completion Callable completion entry point.
+   * @param cancellation Cancellation when provided.
+   * @return True when local callable setup succeeded.
+   * @remarks Backend-local await registration failures are still reported
+   * asynchronously through the completion with `BOUNCE_COMPLETION_ABORTED`.
+   * Exceptions must not escape the callable.
+   */
+  template<typename COMPLETION_TYPE>
+  inline bool wait(
+    condition &condition_instance,
+    COMPLETION_TYPE&& completion,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    typedef typename std::decay<COMPLETION_TYPE>::type AWAIT_COMPLETION_TYPE;
+    std::unique_ptr<AWAIT_COMPLETION_TYPE> completion_state;
+
+    try {
+      completion_state.reset(
+        new AWAIT_COMPLETION_TYPE(std::forward<COMPLETION_TYPE>(completion)));
+    } catch (...) {
+      return false;
+    }
+
+    ::bounce_await_posix_glib_condition(
+      this->get_core(),
+      condition_instance.get_condition(),
+      &bounce_base<BOUNCE_CORE>::template callable_completion<AWAIT_COMPLETION_TYPE>,
+      completion_state.get(),
+      cancellation);
+
+    (void)completion_state.release();
+    return true;
+  }
+
+#if LIBBOUNCE_HAS_COROUTINE_SUPPORT
+  /**
+   * @brief Await a backend-local POSIX+GLib condition inside a coroutine.
+   * @param condition_instance Initialized backend-local condition.
+   * @param cancellation Cancellation when provided.
+   * @return Coroutine awaitable operation.
+   */
+  await_operation await(
+    condition &condition_instance,
+    BOUNCE_CANCELLATION *cancellation) noexcept;
+#endif
+
+  /**
+   * @brief Raise a backend-local POSIX+GLib condition.
+   * @param condition_instance Initialized backend-local condition.
+   */
+  inline void raise(condition &condition_instance) noexcept {
+    ::bounce_posix_glib_condition_raise(
+      this->get_core(),
+      condition_instance.get_condition());
   }
 
   /**
@@ -651,6 +813,88 @@ public:
     return current ?
              std::optional<bounce_ref>(current) :
              std::nullopt;
+  }
+
+  /**
+   * @brief Await a backend-local POSIX+GLib condition and continue on a parked
+   * thread.
+   * @param condition_instance Initialized backend-local condition.
+   * @param completion Completion callback entry point.
+   * @param completion_state User provided completion callback state.
+   * @param cancellation Cancellation when provided.
+   */
+  inline void wait(
+    condition &condition_instance,
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    ::bounce_await_posix_glib_condition(
+      this->get_core(),
+      condition_instance.get_condition(),
+      completion,
+      completion_state,
+      cancellation);
+  }
+
+  /**
+   * @brief Await a backend-local POSIX+GLib condition with a C++ callable
+   * completion.
+   * @tparam COMPLETION_TYPE Callable type. Must be invocable with no arguments
+   * or `BOUNCE_COMPLETION_RESULT`.
+   * @param condition_instance Initialized backend-local condition.
+   * @param completion Callable completion entry point.
+   * @param cancellation Cancellation when provided.
+   * @return True when local callable setup succeeded.
+   * @remarks Backend-local await registration failures are still reported
+   * asynchronously through the completion with `BOUNCE_COMPLETION_ABORTED`.
+   * Exceptions must not escape the callable.
+   */
+  template<typename COMPLETION_TYPE>
+  inline bool wait(
+    condition &condition_instance,
+    COMPLETION_TYPE&& completion,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    typedef typename std::decay<COMPLETION_TYPE>::type AWAIT_COMPLETION_TYPE;
+    std::unique_ptr<AWAIT_COMPLETION_TYPE> completion_state;
+
+    try {
+      completion_state.reset(
+        new AWAIT_COMPLETION_TYPE(std::forward<COMPLETION_TYPE>(completion)));
+    } catch (...) {
+      return false;
+    }
+
+    ::bounce_await_posix_glib_condition(
+      this->get_core(),
+      condition_instance.get_condition(),
+      &callable_completion<AWAIT_COMPLETION_TYPE>,
+      completion_state.get(),
+      cancellation);
+
+    (void)completion_state.release();
+    return true;
+  }
+
+#if LIBBOUNCE_HAS_COROUTINE_SUPPORT
+  /**
+   * @brief Await a backend-local POSIX+GLib condition inside a coroutine.
+   * @param condition_instance Initialized backend-local condition.
+   * @param cancellation Cancellation when provided.
+   * @return Coroutine awaitable operation.
+   */
+  await_operation await(
+    condition &condition_instance,
+    BOUNCE_CANCELLATION *cancellation) noexcept;
+#endif
+
+  /**
+   * @brief Raise a backend-local POSIX+GLib condition.
+   * @param condition_instance Initialized backend-local condition.
+   */
+  inline void raise(condition &condition_instance) noexcept {
+    ::bounce_posix_glib_condition_raise(
+      this->get_core(),
+      condition_instance.get_condition());
   }
 
   /**

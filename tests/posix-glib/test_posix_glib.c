@@ -36,6 +36,9 @@ extern void test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_a
 extern void test_cpp_wrapper_set_default_timeout_await_runs(void);
 extern void test_cpp_wrapper_set_default_overrides_fallback_view(void);
 extern void test_cpp_wrapper_current_post_runs_on_defaulted_parker(void);
+extern void test_cpp_wrapper_condition_await_runs(void);
+extern void test_cpp_wrapper_lambda_condition_await_runs(void);
+extern void test_cpp_wrapper_lambda_condition_await_aborts_on_deinit(void);
 extern void test_cpp_wrapper_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_runs(void);
 extern void test_cpp_wrapper_lambda_fd_await_aborts_on_deinit(void);
@@ -59,6 +62,7 @@ extern void test_cpp_promise_await_canceled_runs(void);
 extern void test_cpp_promise_fire_and_forget_void_runs(void);
 extern void test_cpp_promise_fire_and_forget_value_runs(void);
 extern void test_cpp_promise_fire_and_forget_empty_fails(void);
+extern void test_cpp_promise_condition_await_runs(void);
 extern void test_cpp_promise_fd_await_runs(void);
 extern void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs(void);
 extern void test_cpp_promise_file_io_async_runs(void);
@@ -1399,6 +1403,169 @@ static void test_fd_await_cancel_completes_canceled(void) {
   ASSERT_TRUE(close(pipe_fds[1]) == 0);
 }
 
+static void test_single_condition_await_runs(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_POSIX_GLIB_CONDITION condition;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+
+  bounce_init(&bounce);
+  bounce_posix_glib_condition_init(&condition);
+  test_start_parker(&bounce, &park_context);
+  test_completion_context_init(&completion_context, NULL);
+
+  bounce_await_posix_glib_condition(
+    &bounce,
+    &condition,
+    test_completion_callback,
+    &completion_context,
+    NULL);
+  bounce_posix_glib_condition_raise(&bounce, &condition);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(completion_context.callback_thread_set);
+  ASSERT_TRUE(pthread_equal(completion_context.callback_thread, park_context.thread));
+
+  bounce_posix_glib_condition_raise(&bounce, &condition);
+  test_wait_no_additional_completion(&completion_context, 1u);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_deinit(&bounce);
+}
+
+static void test_condition_await_cancel_completes_canceled(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_POSIX_GLIB_CONDITION condition;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  BOUNCE_CANCELLATION cancellation;
+
+  bounce_init(&bounce);
+  bounce_posix_glib_condition_init(&condition);
+  bounce_cancellation_init(&cancellation);
+  test_start_parker(&bounce, &park_context);
+  test_completion_context_init(&completion_context, NULL);
+
+  bounce_await_posix_glib_condition(
+    &bounce,
+    &condition,
+    test_completion_callback,
+    &completion_context,
+    &cancellation);
+  bounce_cancel(&bounce, &cancellation);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(completion_context.callback_thread_set);
+  ASSERT_TRUE(pthread_equal(completion_context.callback_thread, park_context.thread));
+
+  bounce_posix_glib_condition_raise(&bounce, &condition);
+  test_wait_no_additional_completion(&completion_context, 1u);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_deinit(&bounce);
+}
+
+static void test_condition_await_with_already_canceled_source_completes_canceled(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_POSIX_GLIB_CONDITION condition;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  BOUNCE_CANCELLATION cancellation;
+
+  bounce_init(&bounce);
+  bounce_posix_glib_condition_init(&condition);
+  bounce_cancellation_init(&cancellation);
+  test_start_parker(&bounce, &park_context);
+  test_completion_context_init(&completion_context, NULL);
+
+  bounce_cancel(&bounce, &cancellation);
+  bounce_await_posix_glib_condition(
+    &bounce,
+    &condition,
+    test_completion_callback,
+    &completion_context,
+    &cancellation);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(completion_context.callback_thread_set);
+  ASSERT_TRUE(pthread_equal(completion_context.callback_thread, park_context.thread));
+
+  bounce_posix_glib_condition_raise(&bounce, &condition);
+  test_wait_no_additional_completion(&completion_context, 1u);
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_deinit(&bounce);
+}
+
+static void test_condition_completion_wins_over_later_cancel(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_POSIX_GLIB_CONDITION condition;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  BOUNCE_CANCELLATION cancellation;
+
+  bounce_init(&bounce);
+  bounce_posix_glib_condition_init(&condition);
+  bounce_cancellation_init(&cancellation);
+  test_start_parker(&bounce, &park_context);
+  test_completion_context_init(&completion_context, NULL);
+
+  bounce_await_posix_glib_condition(
+    &bounce,
+    &condition,
+    test_completion_callback,
+    &completion_context,
+    &cancellation);
+  bounce_posix_glib_condition_raise(&bounce, &condition);
+  test_wait_completion_count(&completion_context, 1u);
+  bounce_cancel(&bounce, &cancellation);
+  test_wait_no_additional_completion(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(completion_context.callback_thread_set);
+  ASSERT_TRUE(pthread_equal(completion_context.callback_thread, park_context.thread));
+
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_deinit(&bounce);
+}
+
+static void test_condition_deinit_aborts_pending_callback(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_POSIX_GLIB_CONDITION condition;
+  TEST_COMPLETION_CONTEXT completion_context;
+
+  bounce_init(&bounce);
+  bounce_posix_glib_condition_init(&condition);
+  test_completion_context_init(&completion_context, NULL);
+
+  bounce_await_posix_glib_condition(
+    &bounce,
+    &condition,
+    test_completion_callback,
+    &completion_context,
+    NULL);
+  bounce_deinit(&bounce);
+
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_ABORTED);
+
+  test_completion_context_destroy(&completion_context);
+}
+
 static void test_register_canceled_completes_canceled(void) {
   BOUNCE_CORE bounce;
   TEST_PARK_THREAD_CONTEXT park_context;
@@ -1734,6 +1901,9 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_wrapper_registration_precanceled_completes_canceled),
     TEST_CASE_ENTRY(test_cpp_wrapper_shutdown_wait_for_idle_keeps_pending_registration_alive),
     TEST_CASE_ENTRY(test_cpp_wrapper_current_post_runs_on_defaulted_parker),
+    TEST_CASE_ENTRY(test_cpp_wrapper_condition_await_runs),
+    TEST_CASE_ENTRY(test_cpp_wrapper_lambda_condition_await_runs),
+    TEST_CASE_ENTRY(test_cpp_wrapper_lambda_condition_await_aborts_on_deinit),
     TEST_CASE_ENTRY(test_cpp_wrapper_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_wrapper_lambda_fd_await_aborts_on_deinit),
@@ -1757,6 +1927,7 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_void_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_value_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_empty_fails),
+    TEST_CASE_ENTRY(test_cpp_promise_condition_await_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs),
     TEST_CASE_ENTRY(test_cpp_promise_file_io_async_runs),
@@ -1777,6 +1948,11 @@ int main(void) {
     TEST_CASE_ENTRY(test_socket_send_recv_await_runs),
     TEST_CASE_ENTRY(test_socket_recvfrom_await_cancel_completes_canceled),
     TEST_CASE_ENTRY(test_socket_send_await_reports_syscall_error),
+    TEST_CASE_ENTRY(test_single_condition_await_runs),
+    TEST_CASE_ENTRY(test_condition_await_cancel_completes_canceled),
+    TEST_CASE_ENTRY(test_condition_await_with_already_canceled_source_completes_canceled),
+    TEST_CASE_ENTRY(test_condition_completion_wins_over_later_cancel),
+    TEST_CASE_ENTRY(test_condition_deinit_aborts_pending_callback),
     TEST_CASE_ENTRY(test_post_then_fd_order),
     TEST_CASE_ENTRY(test_nested_post_inline_depth_benchmark),
     TEST_CASE_ENTRY(test_single_timeout_runs),

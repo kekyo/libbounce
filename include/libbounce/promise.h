@@ -2760,6 +2760,28 @@ inline promise<socket_io_result> send_msg_async(
 
 #if defined(BOUNCE_POSIX_GLIB)
 inline await_operation bounce_ref::await(
+  condition &condition_instance,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  BOUNCE_CORE *core = this->get_core();
+  BOUNCE_POSIX_GLIB_CONDITION *condition_storage = condition_instance.get_condition();
+
+  return make_awaitable(
+    *this,
+    [core, condition_storage](
+      BOUNCE_COMPLETION completion,
+      void *completion_state,
+      BOUNCE_CANCELLATION *operation_cancellation) noexcept {
+      ::bounce_await_posix_glib_condition(
+        core,
+        condition_storage,
+        completion,
+        completion_state,
+        operation_cancellation);
+    },
+    cancellation);
+}
+
+inline await_operation bounce_ref::await(
   int fd,
   GIOCondition condition,
   BOUNCE_CANCELLATION *cancellation) noexcept {
@@ -2775,6 +2797,28 @@ inline await_operation bounce_ref::await(
         core,
         fd,
         condition,
+        completion,
+        completion_state,
+        operation_cancellation);
+    },
+    cancellation);
+}
+
+inline await_operation bounce::await(
+  condition &condition_instance,
+  BOUNCE_CANCELLATION *cancellation) noexcept {
+  BOUNCE_CORE *core = this->get_core();
+  BOUNCE_POSIX_GLIB_CONDITION *condition_storage = condition_instance.get_condition();
+
+  return make_awaitable(
+    *this,
+    [core, condition_storage](
+      BOUNCE_COMPLETION completion,
+      void *completion_state,
+      BOUNCE_CANCELLATION *operation_cancellation) noexcept {
+      ::bounce_await_posix_glib_condition(
+        core,
+        condition_storage,
         completion,
         completion_state,
         operation_cancellation);

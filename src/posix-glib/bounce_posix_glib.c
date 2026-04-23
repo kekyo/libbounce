@@ -45,8 +45,10 @@
  * - fd waiting is integrated through one-shot `GSource` objects attached to the
  *   same main context. These sources claim the completion item, enqueue it into
  *   the ready queue, and then remove themselves.
+ * - Backend-local conditions store waiters in a simple list and move the
+ *   current waiters to the same ready queue when raised.
  * - The completion flow therefore remains:
- *     post()/fd-ready -> ready queue -> main-context wake -> ready source
+ *     post()/condition/fd-ready -> ready queue -> main-context wake -> ready source
  *     dispatch -> execute completion.
  */
 
@@ -201,13 +203,16 @@ static inline void bounce_posix_glib_prepare_reserved_item(__BOUNCE_COMPLETION_I
   item->ready_or_free_link.next = NULL;
   item->cancellation_link.previous = NULL;
   item->cancellation_link.next = NULL;
+  item->condition_link.previous = NULL;
+  item->condition_link.next = NULL;
   item->state = BOUNCE_COMPLETION_ITEM_STATE_CLAIMED;
   item->completion = NULL;
   item->completion_state = NULL;
   item->completion_result = BOUNCE_COMPLETION_ABORTED;
   item->bounce = NULL;
   item->fd = BOUNCE_POSIX_GLIB_INVALID_FD;
-  item->condition = (GIOCondition)0;
+  item->fd_condition = (GIOCondition)0;
+  item->condition = NULL;
   item->cancellation = NULL;
   item->registration_owner = NULL;
   item->source = NULL;
@@ -350,6 +355,14 @@ static inline bool bounce_posix_glib_item_is_cancellation_linked(
            &item->cancellation_link);
 }
 
+static inline bool bounce_posix_glib_item_is_condition_linked(
+  const __BOUNCE_COMPLETION_ITEM *item) {
+  return (item->condition != NULL) &&
+         bounce_posix_glib_list_item_is_linked(
+           &item->condition->waiters,
+           &item->condition_link);
+}
+
 static inline void bounce_posix_glib_unlink_cancellation_locked(
   __BOUNCE_COMPLETION_ITEM *item) {
   BOUNCE_CANCELLATION *cancellation = item->cancellation;
@@ -365,6 +378,23 @@ static inline void bounce_posix_glib_unlink_cancellation_locked(
   (void)bounce_posix_glib_unlock(&cancellation->lock);
 
   item->cancellation = NULL;
+}
+
+static inline void bounce_posix_glib_unlink_condition_locked(
+  __BOUNCE_COMPLETION_ITEM *item) {
+  BOUNCE_POSIX_GLIB_CONDITION *condition = item->condition;
+
+  if (condition == NULL) {
+    return;
+  }
+
+  (void)bounce_posix_glib_lock(&condition->lock);
+  if (bounce_posix_glib_item_is_condition_linked(item)) {
+    bounce_list_remove(&condition->waiters, &item->condition_link);
+  }
+  (void)bounce_posix_glib_unlock(&condition->lock);
+
+  item->condition = NULL;
 }
 
 static inline GSource *bounce_posix_glib_take_source_locked(
@@ -389,6 +419,7 @@ static inline GSource *bounce_posix_glib_detach_wait_locked(
   GSource *source = bounce_posix_glib_take_source_locked(r, item);
 
   bounce_posix_glib_unlink_cancellation_locked(item);
+  bounce_posix_glib_unlink_condition_locked(item);
 #if defined(__linux__)
   if (item->io_uring_wait != NULL) {
     __BOUNCE_POSIX_IO_URING_WAIT *wait = item->io_uring_wait;
@@ -829,7 +860,7 @@ static gboolean bounce_posix_glib_fd_source_check(GSource *source) {
   }
 
   revents = g_source_query_unix_fd(source, fd_source->tag);
-  return (revents & (item->condition | G_IO_ERR | G_IO_HUP | G_IO_NVAL)) != 0;
+  return (revents & (item->fd_condition | G_IO_ERR | G_IO_HUP | G_IO_NVAL)) != 0;
 }
 
 static gboolean bounce_posix_glib_fd_source_dispatch(
@@ -1173,6 +1204,150 @@ bool bounce_post(BOUNCE_CORE *r, BOUNCE_COMPLETION completion, void *completion_
 }
 
 /**
+ * @brief Initialize a backend-local POSIX+GLib condition object.
+ * @param condition Condition storage provided by the caller.
+ */
+void bounce_posix_glib_condition_init(
+  BOUNCE_POSIX_GLIB_CONDITION *condition) {
+  if (condition == NULL) {
+    return;
+  }
+
+  memset(condition, 0, sizeof *condition);
+  (void)pthread_mutex_init(&condition->lock, NULL);
+  bounce_list_init(&condition->waiters);
+}
+
+/**
+ * @brief Await a backend-local POSIX+GLib condition.
+ * @param r Initialized BOUNCE_CORE.
+ * @param condition Initialized condition object.
+ * @param completion Completion callback entry point.
+ * @param completion_state User provided completion callback state.
+ * @param cancellation Cancellation when provided.
+ */
+void bounce_await_posix_glib_condition(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_GLIB_CONDITION *condition,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation) {
+  __BOUNCE_COMPLETION_ITEM *item;
+  __BOUNCE_POSIX_GLIB_START_RESULT start_result;
+
+  if ((r == NULL) ||
+      (condition == NULL) ||
+      (completion == NULL)) {
+    bounce_posix_glib_complete_direct(
+      completion,
+      completion_state,
+      BOUNCE_COMPLETION_ABORTED);
+    return;
+  }
+
+  item = bounce_posix_glib_allocate_completion_item(r);
+  if (item == NULL) {
+    bounce_posix_glib_complete_direct(
+      completion,
+      completion_state,
+      BOUNCE_COMPLETION_ABORTED);
+    return;
+  }
+
+  item->bounce = r;
+  item->completion = completion;
+  item->completion_state = completion_state;
+  item->condition = condition;
+
+  (void)bounce_posix_glib_lock(&r->lock);
+  start_result = bounce_posix_glib_activate_wait_item_locked(
+    r,
+    item,
+    cancellation);
+  if (start_result == __BOUNCE_POSIX_GLIB_START_RESULT_WAITING) {
+    (void)bounce_posix_glib_lock(&condition->lock);
+    bounce_list_insert_tail(&condition->waiters, &item->condition_link);
+    (void)bounce_posix_glib_unlock(&condition->lock);
+  }
+  (void)bounce_posix_glib_unlock(&r->lock);
+
+  switch (start_result) {
+    case __BOUNCE_POSIX_GLIB_START_RESULT_WAITING:
+      return;
+    case __BOUNCE_POSIX_GLIB_START_RESULT_READY_QUEUED:
+      bounce_posix_glib_signal_parker(r);
+      return;
+    case __BOUNCE_POSIX_GLIB_START_RESULT_READY_INLINE:
+      bounce_posix_glib_execute_claimed_item(r, item, 0u);
+      return;
+    case __BOUNCE_POSIX_GLIB_START_RESULT_FAILED:
+    default:
+      bounce_posix_glib_recycle_completion_item(r, item);
+      bounce_posix_glib_complete_direct(
+        completion,
+        completion_state,
+        BOUNCE_COMPLETION_ABORTED);
+      return;
+  }
+}
+
+/**
+ * @brief Raise a backend-local POSIX+GLib condition.
+ * @param r Initialized BOUNCE_CORE.
+ * @param condition Initialized condition object.
+ */
+void bounce_posix_glib_condition_raise(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_GLIB_CONDITION *condition) {
+  bool wake_parker = false;
+
+  if ((r == NULL) ||
+      (condition == NULL)) {
+    return;
+  }
+
+  (void)bounce_posix_glib_lock(&r->lock);
+  (void)bounce_posix_glib_lock(&condition->lock);
+  for (;;) {
+    BOUNCE_LIST_ITEM *list_item =
+      (BOUNCE_LIST_ITEM *)bounce_list_pop_head(&condition->waiters);
+    __BOUNCE_COMPLETION_ITEM *item;
+
+    if (list_item == NULL) {
+      break;
+    }
+
+    item = BOUNCE_POSIX_GLIB_CONTAINER_OF(
+      list_item,
+      __BOUNCE_COMPLETION_ITEM,
+      condition_link);
+    item->condition = NULL;
+    if (item->state != BOUNCE_COMPLETION_ITEM_STATE_WAITING) {
+      continue;
+    }
+
+    bounce_posix_glib_unlink_cancellation_locked(item);
+    if (item->registration_owner != NULL) {
+      if (item->registration_owner->item == item) {
+        item->registration_owner->item = NULL;
+      }
+      item->registration_owner = NULL;
+    }
+    bounce_posix_glib_queue_ready_locked(
+      r,
+      item,
+      BOUNCE_COMPLETION_COMPLETED);
+    wake_parker = true;
+  }
+  (void)bounce_posix_glib_unlock(&condition->lock);
+  (void)bounce_posix_glib_unlock(&r->lock);
+
+  if (wake_parker) {
+    bounce_posix_glib_signal_parker(r);
+  }
+}
+
+/**
  * @brief Await GLib-integrated file-descriptor readiness through `GSource`.
  * @param r Initialized BOUNCE_CORE.
  * @param fd File descriptor watched by GLib main-context polling.
@@ -1215,7 +1390,7 @@ void bounce_await_posix_glib_fd(
   item->completion = completion;
   item->completion_state = completion_state;
   item->fd = fd;
-  item->condition = condition;
+  item->fd_condition = condition;
 
   (void)bounce_posix_glib_lock(&r->lock);
   start_result = bounce_posix_glib_activate_wait_item_locked(
@@ -1759,6 +1934,7 @@ void bounce_cancel(
     }
 #endif
 
+    bounce_posix_glib_unlink_condition_locked(item);
     source = bounce_posix_glib_take_source_locked(r, item);
     if (item->registration_owner != NULL) {
       if (item->registration_owner->item == item) {

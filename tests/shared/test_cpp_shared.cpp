@@ -109,7 +109,7 @@ static_assert(
     libbounce::bounce_base_ref<BOUNCE_CORE>>::value,
   "libbounce::bounce_ref must be constructible from bounce_base_ref");
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(BOUNCE_FREERTOS)
 static_assert(
   !std::is_copy_constructible<libbounce::condition>::value,
   "libbounce::condition must not be copy constructible");
@@ -1292,7 +1292,7 @@ extern "C" void test_cpp_wrapper_lambda_post_aborts_on_deinit(void) {
   ASSERT_TRUE(test_cpp_runtime_destruction_count(&destroyed_count) == 1);
 }
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(BOUNCE_FREERTOS)
 extern "C" void test_cpp_wrapper_condition_await_runs(void) {
   libbounce::bounce bounce_instance;
   libbounce::condition condition;

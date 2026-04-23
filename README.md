@@ -541,7 +541,7 @@ The main types are as follows.
   A non-owning reference to `bounce`, useful when dealing with a core already
   attached to the current thread.
 
-On POSIX and FreeRTOS, `libbounce::condition` is also available.
+On POSIX, POSIX+GLib, and FreeRTOS, `libbounce::condition` is also available.
 
 The simplest usage is to pass a lambda instead of a C function pointer.
 
@@ -651,7 +651,7 @@ Each backend adds its own wait targets and helper types.
 |:----|:----|:----|:----|
 |Generic|`libbounce/generic.h`|None|Single-parker generic core with busy-spin parking and timer polling, without backend-specific wait targets|
 |POSIX|`libbounce/posix.h`|`bounce_await_posix_condition()`, `bounce_posix_condition_raise()`, `bounce_await_posix_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_io_uring_op()`|Wait for fd readiness based on `poll()`. Lightweight one-shot condition, file I/O helpers, and socket I/O helpers are also available. Linux can also await one-shot `io_uring` submissions|
-|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. File and socket I/O helpers use that GLib context, and Linux can also forward `io_uring` completions back into it|
+|POSIX+GLib|`libbounce/posix_glib.h`|`bounce_await_posix_glib_condition()`, `bounce_posix_glib_condition_raise()`, `bounce_await_posix_glib_fd()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`, `bounce_socket_io_*()`, `bounce_await_socket_recv()` / `send()` / `recvfrom()` / `sendto()` / `recvmsg()` / `sendmsg()`, Linux-only `bounce_posix_io_uring_op_*()`, `bounce_await_posix_glib_io_uring_op()`|Wait for fd readiness integrated with `GMainContext` / `GSource`. Lightweight one-shot condition, file I/O helpers, and socket I/O helpers use that GLib context, and Linux can also forward `io_uring` completions back into it|
 |FreeRTOS|`libbounce/freertos.h`|`bounce_await_freertos_condition()`, `bounce_freertos_condition_raise()`, `bounce_freertos_condition_raise_from_isr()`|Notify a condition from both task context and ISR context|
 |FreeRTOS + ESP-IDF option|`libbounce/freertos.h`|`bounce_await_freertos_fd()`|Wait for fd readiness only when `BOUNCE_FREERTOS_ENABLE_FD_AWAIT` is enabled|
 |Win32|`libbounce/win32.h`|`bounce_await_win32_handle()`, `bounce_file_io_*()`, `bounce_await_file_read()` / `write()` / `seek()` / `flush()`|Wait on `HANDLE`s such as events and waitable timers. File I/O helpers are also available for Win32 file `HANDLE`s|
@@ -728,7 +728,7 @@ The backend-specific differences are mostly in the arguments of `wait(...)`,
 |:----|:----|
 |Generic|No additional backend-local wait methods. Use `post()` and `libbounce::timer`|
 |POSIX|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, poll_events, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` with `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
-|POSIX+GLib|`bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` with `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
+|POSIX+GLib|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.wait(fd, GIOCondition, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()`; `libbounce::socket_io` with `recv()` / `send()` / `recv_from()` / `send_to()` / `recv_msg()` / `send_msg()`; Linux-only `libbounce::io_uring_operation`, `bounce.wait(*operation.get_operation(), ...)`, `bounce.await(*operation.get_operation(), ...)`|
 |FreeRTOS|`libbounce::condition`, `bounce.wait(condition, ...)`, `bounce.raise(condition)`, `bounce.raise_from_isr(condition)`|
 |FreeRTOS + ESP-IDF option|`bounce.wait(fd, BOUNCE_FREERTOS_FD_EVENT_*, ...)`|
 |Win32|`bounce.wait(HANDLE, ...)`; `libbounce::file_io` with `read()` / `write()` / `seek()` / `flush()` for file `HANDLE`s|

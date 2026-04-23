@@ -543,7 +543,7 @@ static libbounce::promise<int> test_fire_and_forget_value_coroutine(
   co_return 42;
 }
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(BOUNCE_FREERTOS)
 static libbounce::promise<void> test_condition_await_coroutine(
   libbounce::bounce &bounce_instance,
   libbounce::condition &condition_instance,
@@ -1004,7 +1004,7 @@ extern "C" void test_cpp_promise_fire_and_forget_empty_fails(void) {
   ASSERT_TRUE(!libbounce::fire_and_forget(std::move(coroutine)));
 }
 
-#if defined(BOUNCE_POSIX) || defined(BOUNCE_FREERTOS)
+#if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(BOUNCE_FREERTOS)
 extern "C" void test_cpp_promise_condition_await_runs(void) {
   libbounce::bounce bounce_instance;
   libbounce::condition condition_instance;
