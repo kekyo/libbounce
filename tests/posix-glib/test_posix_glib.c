@@ -68,6 +68,11 @@ extern void test_cpp_promise_await_canceled_runs(void);
 extern void test_cpp_promise_fire_and_forget_void_runs(void);
 extern void test_cpp_promise_fire_and_forget_value_runs(void);
 extern void test_cpp_promise_fire_and_forget_empty_fails(void);
+extern void test_cpp_promise_all_runs(void);
+extern void test_cpp_promise_any_runs(void);
+extern void test_cpp_promise_all_cancellation_runs(void);
+extern void test_cpp_async_mutex_lock_runs(void);
+extern void test_cpp_async_semaphore_acquire_canceled(void);
 extern void test_cpp_promise_condition_await_runs(void);
 extern void test_cpp_promise_fd_await_runs(void);
 extern void test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs(void);
@@ -2194,6 +2199,11 @@ int main(void) {
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_void_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_value_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fire_and_forget_empty_fails),
+    TEST_CASE_ENTRY(test_cpp_promise_all_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_any_runs),
+    TEST_CASE_ENTRY(test_cpp_promise_all_cancellation_runs),
+    TEST_CASE_ENTRY(test_cpp_async_mutex_lock_runs),
+    TEST_CASE_ENTRY(test_cpp_async_semaphore_acquire_canceled),
     TEST_CASE_ENTRY(test_cpp_promise_condition_await_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fd_await_runs),
     TEST_CASE_ENTRY(test_cpp_promise_fd_write_all_bytes_awaits_before_each_write_runs),

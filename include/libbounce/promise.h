@@ -19,9 +19,17 @@
 #endif
 
 #include <atomic>
+#include <cstddef>
 #include <coroutine>
+#include <deque>
 #include <exception>
+#include <memory>
+#include <mutex>
 #include <new>
+#include <optional>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "bounce.h"
 
@@ -310,6 +318,182 @@ struct callback_promise_result<void> {
   }
 };
 
+/**
+ * @brief Result returned from @ref promise_all for non-void promises.
+ * @tparam T Promise value type.
+ * @remarks Values are populated only when @ref await reports normal
+ * completion. Cancellation and infrastructure aborts leave the value list
+ * empty.
+ */
+template<typename T>
+struct promise_all_result {
+  await_result await {};
+  std::vector<T> values {};
+
+  /**
+   * @brief Check whether all promises completed normally.
+   * @return True when every input promise completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the wait was canceled.
+   * @return True when cancellation completed the wait.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the wait aborted.
+   * @return True when the wait aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether helper setup failed.
+   * @return True when local setup failed before waiting began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+};
+
+/**
+ * @brief Result returned from @ref promise_all for void promises.
+ * @remarks @ref count is populated only when @ref await reports normal
+ * completion.
+ */
+template<>
+struct promise_all_result<void> {
+  await_result await {};
+  size_t count = 0u;
+
+  /**
+   * @brief Check whether all promises completed normally.
+   * @return True when every input promise completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the wait was canceled.
+   * @return True when cancellation completed the wait.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the wait aborted.
+   * @return True when the wait aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether helper setup failed.
+   * @return True when local setup failed before waiting began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+};
+
+/**
+ * @brief Result returned from @ref promise_any for non-void promises.
+ * @tparam T Promise value type.
+ * @remarks @ref value and @ref index are populated only when @ref await reports
+ * normal completion.
+ */
+template<typename T>
+struct promise_any_result {
+  await_result await {};
+  size_t index = static_cast<size_t>(-1);
+  std::optional<T> value {};
+
+  /**
+   * @brief Check whether one promise completed normally.
+   * @return True when one input promise completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the wait was canceled.
+   * @return True when cancellation completed the wait.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the wait aborted.
+   * @return True when the wait aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether helper setup failed.
+   * @return True when local setup failed before waiting began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+};
+
+/**
+ * @brief Result returned from @ref promise_any for void promises.
+ * @remarks @ref index is populated only when @ref await reports normal
+ * completion.
+ */
+template<>
+struct promise_any_result<void> {
+  await_result await {};
+  size_t index = static_cast<size_t>(-1);
+
+  /**
+   * @brief Check whether one promise completed normally.
+   * @return True when one input promise completed normally.
+   */
+  inline bool completed() const noexcept {
+    return await.completed();
+  }
+
+  /**
+   * @brief Check whether the wait was canceled.
+   * @return True when cancellation completed the wait.
+   */
+  inline bool canceled() const noexcept {
+    return await.canceled();
+  }
+
+  /**
+   * @brief Check whether the wait aborted.
+   * @return True when the wait aborted.
+   */
+  inline bool aborted() const noexcept {
+    return await.aborted();
+  }
+
+  /**
+   * @brief Check whether helper setup failed.
+   * @return True when local setup failed before waiting began.
+   */
+  inline bool start_failed() const noexcept {
+    return await.start_failed();
+  }
+};
+
 template<typename TBOUNCE_HANDLE, typename START_FN>
 inline await_operation make_awaitable(
   TBOUNCE_HANDLE &bounce_handle,
@@ -328,6 +512,20 @@ static inline await_result await_result_from_completion(
     case BOUNCE_COMPLETION_ABORTED:
     default:
       return await_result { await_status::aborted };
+  }
+}
+
+static inline BOUNCE_COMPLETION_RESULT completion_from_await_status(
+  await_status status) noexcept {
+  switch (status) {
+    case await_status::completed:
+      return BOUNCE_COMPLETION_COMPLETED;
+    case await_status::canceled:
+      return BOUNCE_COMPLETION_CANCELED;
+    case await_status::aborted:
+    case await_status::start_failed:
+    default:
+      return BOUNCE_COMPLETION_ABORTED;
   }
 }
 
@@ -893,6 +1091,512 @@ public:
     } catch (...) {
       return from_immediate(await_result { await_status::start_failed });
     }
+  }
+};
+
+class async_semaphore;
+
+namespace detail {
+
+struct async_semaphore_waiter :
+  public std::enable_shared_from_this<async_semaphore_waiter> {
+  std::weak_ptr<class async_semaphore_state> owner;
+  BOUNCE_CORE *core = nullptr;
+  BOUNCE_COMPLETION completion = nullptr;
+  void *completion_state = nullptr;
+  BOUNCE_COMPLETION_RESULT result = BOUNCE_COMPLETION_ABORTED;
+  cancellation_registration registration {};
+  bool has_cancellation = false;
+  bool queued = false;
+  std::atomic<bool> completed { false };
+
+  inline async_semaphore_waiter(
+    std::weak_ptr<class async_semaphore_state> owner_,
+    BOUNCE_CORE *core_,
+    BOUNCE_COMPLETION completion_,
+    void *completion_state_,
+    bool has_cancellation_) noexcept
+    : owner(std::move(owner_)),
+      core(core_),
+      completion(completion_),
+      completion_state(completion_state_),
+      has_cancellation(has_cancellation_) {
+  }
+
+  static void cancellation_callback(
+    BOUNCE_COMPLETION_RESULT result,
+    void *completion_state) noexcept;
+
+  static void posted_completion(
+    BOUNCE_COMPLETION_RESULT result,
+    void *completion_state) noexcept;
+};
+
+class async_semaphore_state :
+  public std::enable_shared_from_this<async_semaphore_state> {
+private:
+  std::mutex mutex_ {};
+  std::deque<std::shared_ptr<async_semaphore_waiter>> waiters_ {};
+  size_t count_;
+  bool closed_ = false;
+
+  inline void complete_direct(
+    const std::shared_ptr<async_semaphore_waiter> &waiter,
+    BOUNCE_COMPLETION_RESULT result) noexcept {
+    waiter->result = result;
+    if (waiter->completion != nullptr) {
+      waiter->completion(result, waiter->completion_state);
+    }
+  }
+
+  inline void post_completion(
+    std::shared_ptr<async_semaphore_waiter> waiter,
+    BOUNCE_COMPLETION_RESULT result) noexcept {
+    BOUNCE_CORE *core = waiter->core;
+    auto *holder =
+      new (std::nothrow) std::shared_ptr<async_semaphore_waiter>(waiter);
+
+    waiter->result = result;
+    if ((holder != nullptr) &&
+        (core != nullptr) &&
+        ::bounce_post(core, &async_semaphore_waiter::posted_completion, holder)) {
+      return;
+    }
+
+    if (holder != nullptr) {
+      delete holder;
+    }
+    complete_direct(
+      waiter,
+      (core != nullptr) ? BOUNCE_COMPLETION_ABORTED : result);
+  }
+
+  inline void erase_waiter_locked(
+    const std::shared_ptr<async_semaphore_waiter> &waiter) noexcept {
+    for (auto iterator = waiters_.begin(); iterator != waiters_.end(); ++iterator) {
+      if (iterator->get() == waiter.get()) {
+        waiters_.erase(iterator);
+        return;
+      }
+    }
+  }
+
+public:
+  explicit inline async_semaphore_state(size_t initial_count) noexcept
+    : count_(initial_count) {
+  }
+
+  async_semaphore_state(const async_semaphore_state&) = delete;
+  async_semaphore_state& operator=(const async_semaphore_state&) = delete;
+
+  inline ~async_semaphore_state() noexcept {
+    close();
+  }
+
+  inline bool start_acquire(
+    BOUNCE_CORE *core,
+    BOUNCE_CANCELLATION *cancellation,
+    BOUNCE_COMPLETION completion,
+    void *completion_state) noexcept {
+    std::shared_ptr<async_semaphore_waiter> waiter;
+    BOUNCE_COMPLETION_RESULT immediate_result = BOUNCE_COMPLETION_ABORTED;
+    bool complete_immediately = false;
+
+    if ((core == nullptr) || (completion == nullptr)) {
+      return false;
+    }
+
+    try {
+      waiter = std::make_shared<async_semaphore_waiter>(
+        weak_from_this(),
+        core,
+        completion,
+        completion_state,
+        cancellation != nullptr);
+    } catch (...) {
+      return false;
+    }
+
+    if (cancellation != nullptr) {
+      if (!::bounce_register_canceled(
+            core,
+            cancellation,
+            waiter->registration.get_registration(),
+            &async_semaphore_waiter::cancellation_callback,
+            waiter.get())) {
+        return false;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (waiter->completed.load(std::memory_order_acquire)) {
+        return true;
+      }
+
+      if (closed_) {
+        if (waiter->has_cancellation &&
+            !::bounce_unregister_canceled(waiter->registration.get_registration())) {
+          return true;
+        }
+        complete_immediately = !waiter->completed.exchange(
+          true,
+          std::memory_order_acq_rel);
+        immediate_result = BOUNCE_COMPLETION_ABORTED;
+      } else if (count_ != 0u) {
+        if (waiter->has_cancellation &&
+            !::bounce_unregister_canceled(waiter->registration.get_registration())) {
+          return true;
+        }
+        --count_;
+        complete_immediately = !waiter->completed.exchange(
+          true,
+          std::memory_order_acq_rel);
+        immediate_result = BOUNCE_COMPLETION_COMPLETED;
+      } else {
+        waiter->queued = true;
+        waiters_.push_back(waiter);
+      }
+    }
+
+    if (complete_immediately) {
+      complete_direct(waiter, immediate_result);
+    }
+    return true;
+  }
+
+  inline bool try_acquire() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (closed_ || (count_ == 0u)) {
+      return false;
+    }
+
+    --count_;
+    return true;
+  }
+
+  inline void release(size_t update) noexcept {
+    std::vector<std::shared_ptr<async_semaphore_waiter>> completions;
+
+    if (update == 0u) {
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (closed_) {
+        return;
+      }
+
+      for (size_t release_index = 0u; release_index < update; release_index++) {
+        bool handed_to_waiter = false;
+
+        while (!waiters_.empty()) {
+          std::shared_ptr<async_semaphore_waiter> waiter = waiters_.front();
+
+          waiters_.pop_front();
+          waiter->queued = false;
+          if (waiter->completed.load(std::memory_order_acquire)) {
+            continue;
+          }
+          if (waiter->has_cancellation &&
+              !::bounce_unregister_canceled(waiter->registration.get_registration())) {
+            continue;
+          }
+          if (!waiter->completed.exchange(true, std::memory_order_acq_rel)) {
+            completions.push_back(waiter);
+            handed_to_waiter = true;
+            break;
+          }
+        }
+
+        if (!handed_to_waiter) {
+          ++count_;
+        }
+      }
+    }
+
+    for (auto &waiter : completions) {
+      post_completion(std::move(waiter), BOUNCE_COMPLETION_COMPLETED);
+    }
+  }
+
+  inline void close() noexcept {
+    std::vector<std::shared_ptr<async_semaphore_waiter>> completions;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (closed_) {
+        return;
+      }
+      closed_ = true;
+
+      while (!waiters_.empty()) {
+        std::shared_ptr<async_semaphore_waiter> waiter = waiters_.front();
+
+        waiters_.pop_front();
+        waiter->queued = false;
+        if (waiter->completed.load(std::memory_order_acquire)) {
+          continue;
+        }
+        if (waiter->has_cancellation &&
+            !::bounce_unregister_canceled(waiter->registration.get_registration())) {
+          continue;
+        }
+        if (!waiter->completed.exchange(true, std::memory_order_acq_rel)) {
+          completions.push_back(waiter);
+        }
+      }
+    }
+
+    for (auto &waiter : completions) {
+      post_completion(std::move(waiter), BOUNCE_COMPLETION_ABORTED);
+    }
+  }
+
+  inline void cancel_waiter(
+    const std::shared_ptr<async_semaphore_waiter> &waiter,
+    BOUNCE_COMPLETION_RESULT result) noexcept {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (waiter->queued) {
+        erase_waiter_locked(waiter);
+        waiter->queued = false;
+      }
+    }
+
+    if (!waiter->completed.exchange(true, std::memory_order_acq_rel)) {
+      complete_direct(waiter, result);
+    }
+  }
+};
+
+inline void async_semaphore_waiter::cancellation_callback(
+  BOUNCE_COMPLETION_RESULT result,
+  void *completion_state) noexcept {
+  auto *waiter = static_cast<async_semaphore_waiter *>(completion_state);
+  std::shared_ptr<async_semaphore_waiter> waiter_ref;
+  std::shared_ptr<async_semaphore_state> owner_ref;
+
+  if (waiter == nullptr) {
+    return;
+  }
+
+  waiter_ref = waiter->weak_from_this().lock();
+  if (!waiter_ref) {
+    return;
+  }
+
+  owner_ref = waiter_ref->owner.lock();
+  if (owner_ref) {
+    owner_ref->cancel_waiter(waiter_ref, result);
+    return;
+  }
+
+  if (!waiter_ref->completed.exchange(true, std::memory_order_acq_rel) &&
+      (waiter_ref->completion != nullptr)) {
+    waiter_ref->completion(result, waiter_ref->completion_state);
+  }
+}
+
+inline void async_semaphore_waiter::posted_completion(
+  BOUNCE_COMPLETION_RESULT result,
+  void *completion_state) noexcept {
+  std::unique_ptr<std::shared_ptr<async_semaphore_waiter>> holder(
+    static_cast<std::shared_ptr<async_semaphore_waiter> *>(completion_state));
+  std::shared_ptr<async_semaphore_waiter> waiter = std::move(*holder);
+  const BOUNCE_COMPLETION_RESULT completion_result =
+    (result == BOUNCE_COMPLETION_COMPLETED) ?
+      waiter->result :
+      BOUNCE_COMPLETION_ABORTED;
+
+  if (waiter->completion != nullptr) {
+    waiter->completion(completion_result, waiter->completion_state);
+  }
+}
+
+}  // namespace detail
+
+/**
+ * @brief Asynchronous counting semaphore for libbounce coroutines.
+ * @remarks Waiting acquires are resumed through the bounce handle passed to
+ * @ref acquire. Cancellation completes the acquire with
+ * @ref await_status::canceled and does not consume a permit.
+ */
+class async_semaphore {
+private:
+  std::shared_ptr<detail::async_semaphore_state> state_;
+
+public:
+  /**
+   * @brief Create a semaphore.
+   * @param initial_count Number of permits initially available.
+   */
+  explicit inline async_semaphore(size_t initial_count = 0u)
+    : state_(std::make_shared<detail::async_semaphore_state>(initial_count)) {
+  }
+
+  async_semaphore(const async_semaphore&) = delete;
+  async_semaphore& operator=(const async_semaphore&) = delete;
+
+  inline async_semaphore(async_semaphore&&) noexcept = default;
+  inline async_semaphore& operator=(async_semaphore&&) noexcept = default;
+
+  /**
+   * @brief Acquire one permit asynchronously.
+   * @tparam TBOUNCE_HANDLE Bounce handle type exposing `get_core()`.
+   * @param bounce_handle Bounce handle used to resume the waiter.
+   * @param cancellation Optional cancellation that can cancel this acquire.
+   * @return Awaitable operation that completes when a permit is acquired,
+   * canceled, aborted, or setup fails.
+   */
+  template<typename TBOUNCE_HANDLE>
+  inline await_operation acquire(
+    TBOUNCE_HANDLE &bounce_handle,
+    BOUNCE_CANCELLATION *cancellation = nullptr) noexcept {
+    BOUNCE_CORE *core = bounce_handle.get_core();
+    auto state = state_;
+
+    return (state && (core != nullptr)) ?
+             await_operation::create(
+               [state, core, cancellation](
+                 BOUNCE_COMPLETION completion,
+                 void *completion_state,
+                 BOUNCE_CANCELLATION * /*operation_cancellation*/) noexcept -> bool {
+                 return state->start_acquire(
+                   core,
+                   cancellation,
+                   completion,
+                   completion_state);
+               },
+               nullptr) :
+             await_operation::from_immediate(
+               await_result { await_status::start_failed });
+  }
+
+  /**
+   * @brief Acquire one permit asynchronously using the current bounce core.
+   * @param cancellation Optional cancellation that can cancel this acquire.
+   * @return Awaitable operation that completes when a permit is acquired,
+   * canceled, aborted, or setup fails.
+   */
+  inline await_operation acquire(
+    BOUNCE_CANCELLATION *cancellation = nullptr) noexcept {
+    BOUNCE_CORE *core = ::bounce_get_core();
+    auto state = state_;
+
+    return (state && (core != nullptr)) ?
+             await_operation::create(
+               [state, core, cancellation](
+                 BOUNCE_COMPLETION completion,
+                 void *completion_state,
+                 BOUNCE_CANCELLATION * /*operation_cancellation*/) noexcept -> bool {
+                 return state->start_acquire(
+                   core,
+                   cancellation,
+                   completion,
+                   completion_state);
+               },
+               nullptr) :
+             await_operation::from_immediate(
+               await_result { await_status::start_failed });
+  }
+
+  /**
+   * @brief Try to acquire one permit synchronously.
+   * @return True when a permit was acquired.
+   */
+  inline bool try_acquire() noexcept {
+    return state_ ? state_->try_acquire() : false;
+  }
+
+  /**
+   * @brief Release permits and resume waiting coroutines.
+   * @param update Number of permits to release.
+   */
+  inline void release(size_t update = 1u) noexcept {
+    if (state_) {
+      state_->release(update);
+    }
+  }
+
+  /**
+   * @brief Abort all pending waiters and close this semaphore state.
+   */
+  inline void close() noexcept {
+    if (state_) {
+      state_->close();
+    }
+  }
+};
+
+/**
+ * @brief Asynchronous mutex for libbounce coroutines.
+ * @remarks The mutex is non-recursive. Cancellation of a pending lock does not
+ * acquire the mutex.
+ */
+class async_mutex {
+private:
+  async_semaphore semaphore_;
+
+public:
+  /**
+   * @brief Create an unlocked async mutex.
+   */
+  inline async_mutex()
+    : semaphore_(1u) {
+  }
+
+  async_mutex(const async_mutex&) = delete;
+  async_mutex& operator=(const async_mutex&) = delete;
+
+  inline async_mutex(async_mutex&&) noexcept = default;
+  inline async_mutex& operator=(async_mutex&&) noexcept = default;
+
+  /**
+   * @brief Lock the mutex asynchronously.
+   * @tparam TBOUNCE_HANDLE Bounce handle type exposing `get_core()`.
+   * @param bounce_handle Bounce handle used to resume the waiter.
+   * @param cancellation Optional cancellation that can cancel this lock wait.
+   * @return Awaitable operation that completes when the mutex is locked,
+   * canceled, aborted, or setup fails.
+   */
+  template<typename TBOUNCE_HANDLE>
+  inline await_operation lock(
+    TBOUNCE_HANDLE &bounce_handle,
+    BOUNCE_CANCELLATION *cancellation = nullptr) noexcept {
+    return semaphore_.acquire(bounce_handle, cancellation);
+  }
+
+  /**
+   * @brief Lock the mutex asynchronously using the current bounce core.
+   * @param cancellation Optional cancellation that can cancel this lock wait.
+   * @return Awaitable operation that completes when the mutex is locked,
+   * canceled, aborted, or setup fails.
+   */
+  inline await_operation lock(
+    BOUNCE_CANCELLATION *cancellation = nullptr) noexcept {
+    return semaphore_.acquire(cancellation);
+  }
+
+  /**
+   * @brief Try to lock the mutex synchronously.
+   * @return True when the mutex was locked.
+   */
+  inline bool try_lock() noexcept {
+    return semaphore_.try_acquire();
+  }
+
+  /**
+   * @brief Unlock the mutex and resume one waiter when present.
+   */
+  inline void unlock() noexcept {
+    semaphore_.release();
   }
 };
 
@@ -1557,6 +2261,660 @@ inline bool fire_and_forget(promise<T>&& operation) noexcept {
   } catch (...) {
     return false;
   }
+}
+
+namespace detail {
+
+template<typename T>
+class promise_group_value_store {
+private:
+  std::vector<std::optional<T>> all_values_;
+  std::optional<T> any_value_ {};
+
+public:
+  explicit inline promise_group_value_store(size_t count)
+    : all_values_(count) {
+  }
+
+  template<typename U>
+  inline void set_all(size_t index, U&& value) {
+    all_values_[index].emplace(std::forward<U>(value));
+  }
+
+  template<typename U>
+  inline void set_any(U&& value) {
+    any_value_.emplace(std::forward<U>(value));
+  }
+
+  inline std::vector<T> consume_all() {
+    std::vector<T> values;
+
+    values.reserve(all_values_.size());
+    for (auto &value : all_values_) {
+      values.push_back(std::move(*value));
+    }
+    return values;
+  }
+
+  inline std::optional<T> consume_any() {
+    return std::move(any_value_);
+  }
+};
+
+template<>
+class promise_group_value_store<void> {
+public:
+  explicit inline promise_group_value_store(size_t /*count*/) noexcept {
+  }
+
+  inline void set_all(size_t /*index*/) noexcept {
+  }
+
+  inline void set_any() noexcept {
+  }
+};
+
+template<typename T, bool ANY>
+class promise_group_state :
+  public std::enable_shared_from_this<promise_group_state<T, ANY>> {
+private:
+  struct cancellation_holder {
+    std::shared_ptr<promise_group_state> state;
+
+    explicit inline cancellation_holder(
+      std::shared_ptr<promise_group_state> state_) noexcept
+      : state(std::move(state_)) {
+    }
+  };
+
+  std::mutex mutex_ {};
+  promise_group_value_store<T> values_;
+  const size_t operation_count_;
+  size_t remaining_;
+  size_t failed_count_ = 0u;
+  size_t any_index_ = static_cast<size_t>(-1);
+  bool resolved_ = false;
+  await_status status_ = await_status::aborted;
+  std::exception_ptr exception_ {};
+  BOUNCE_COMPLETION completion_ = nullptr;
+  void *completion_state_ = nullptr;
+  std::unique_ptr<cancellation_registration> cancellation_registration_ {};
+  cancellation_holder *cancellation_holder_ = nullptr;
+
+  inline void take_completion_locked(
+    BOUNCE_COMPLETION *completion,
+    void **completion_state,
+    await_status *status) noexcept {
+    *completion = completion_;
+    *completion_state = completion_state_;
+    *status = status_;
+    completion_ = nullptr;
+    completion_state_ = nullptr;
+  }
+
+  inline void resolve_locked(
+    await_status status,
+    BOUNCE_COMPLETION *completion,
+    void **completion_state,
+    await_status *completion_status) noexcept {
+    if (resolved_) {
+      *completion = nullptr;
+      *completion_state = nullptr;
+      *completion_status = status_;
+      return;
+    }
+
+    resolved_ = true;
+    status_ = status;
+    take_completion_locked(completion, completion_state, completion_status);
+  }
+
+  static inline void complete_waiter(
+    BOUNCE_COMPLETION completion,
+    void *completion_state,
+    await_status status) noexcept {
+    if (completion != nullptr) {
+      completion(completion_from_await_status(status), completion_state);
+    }
+  }
+
+  inline void mark_cancellation_callback_consumed(
+    cancellation_holder *holder) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (cancellation_holder_ == holder) {
+      cancellation_holder_ = nullptr;
+      cancellation_registration_.reset();
+    }
+  }
+
+public:
+  explicit inline promise_group_state(size_t operation_count)
+    : values_(operation_count),
+      operation_count_(operation_count),
+      remaining_(operation_count) {
+    if (operation_count == 0u) {
+      resolved_ = true;
+      status_ = ANY ? await_status::aborted : await_status::completed;
+    }
+  }
+
+  promise_group_state(const promise_group_state&) = delete;
+  promise_group_state& operator=(const promise_group_state&) = delete;
+
+  inline ~promise_group_state() noexcept {
+    disable_cancellation();
+  }
+
+  static inline void cancellation_callback(
+    BOUNCE_COMPLETION_RESULT result,
+    void *completion_state) noexcept {
+    std::unique_ptr<cancellation_holder> holder(
+      static_cast<cancellation_holder *>(completion_state));
+    std::shared_ptr<promise_group_state> state = holder->state;
+
+    state->mark_cancellation_callback_consumed(holder.get());
+    state->resolve_from_status(await_result_from_completion(result).status);
+  }
+
+  inline bool enable_cancellation(
+    BOUNCE_CORE *core,
+    BOUNCE_CANCELLATION *cancellation) noexcept {
+    std::unique_ptr<cancellation_registration> registration;
+    std::unique_ptr<cancellation_holder> holder;
+    cancellation_holder *holder_ptr;
+
+    if (cancellation == nullptr) {
+      return true;
+    }
+    if (core == nullptr) {
+      return false;
+    }
+
+    try {
+      registration.reset(new cancellation_registration());
+      holder.reset(new cancellation_holder(this->shared_from_this()));
+    } catch (...) {
+      return false;
+    }
+
+    holder_ptr = holder.get();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (resolved_) {
+        return true;
+      }
+      cancellation_registration_ = std::move(registration);
+      cancellation_holder_ = holder_ptr;
+    }
+
+    (void)holder.release();
+    if (!::bounce_register_canceled(
+          core,
+          cancellation,
+          cancellation_registration_->get_registration(),
+          &promise_group_state::cancellation_callback,
+          holder_ptr)) {
+      bool delete_holder = false;
+
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (cancellation_holder_ == holder_ptr) {
+          cancellation_holder_ = nullptr;
+          delete_holder = true;
+        }
+        cancellation_registration_.reset();
+      }
+
+      if (delete_holder) {
+        delete holder_ptr;
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  inline void disable_cancellation() noexcept {
+    cancellation_registration *registration = nullptr;
+    cancellation_holder *holder = nullptr;
+    bool delete_holder = false;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      registration = cancellation_registration_.get();
+      holder = cancellation_holder_;
+    }
+
+    if ((registration != nullptr) && (holder != nullptr) &&
+        ::bounce_unregister_canceled(registration->get_registration())) {
+      delete_holder = true;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (cancellation_holder_ == holder) {
+        cancellation_holder_ = nullptr;
+      } else {
+        delete_holder = false;
+      }
+      cancellation_registration_.reset();
+    }
+
+    if (delete_holder) {
+      delete holder;
+    }
+  }
+
+  inline await_operation wait() noexcept {
+    auto state = this->shared_from_this();
+
+    return await_operation::create(
+      [state](
+        BOUNCE_COMPLETION completion,
+        void *completion_state,
+        BOUNCE_CANCELLATION * /*cancellation*/) noexcept -> bool {
+        return state->start_wait(completion, completion_state);
+      },
+      nullptr);
+  }
+
+  inline bool start_wait(
+    BOUNCE_COMPLETION completion,
+    void *completion_state) noexcept {
+    BOUNCE_COMPLETION immediate_completion = nullptr;
+    void *immediate_state = nullptr;
+    await_status immediate_status = await_status::aborted;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (completion_ != nullptr) {
+        return false;
+      }
+      if (resolved_) {
+        if (status_ == await_status::start_failed) {
+          return false;
+        }
+        immediate_completion = completion;
+        immediate_state = completion_state;
+        immediate_status = status_;
+      } else {
+        completion_ = completion;
+        completion_state_ = completion_state;
+        return true;
+      }
+    }
+
+    complete_waiter(immediate_completion, immediate_state, immediate_status);
+    return true;
+  }
+
+  template<typename U>
+  inline void complete_child(size_t index, U&& value) {
+    BOUNCE_COMPLETION completion = nullptr;
+    void *completion_state = nullptr;
+    await_status status = await_status::aborted;
+    bool should_complete = false;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (resolved_) {
+        return;
+      }
+
+      if constexpr (ANY) {
+        values_.set_any(std::forward<U>(value));
+        any_index_ = index;
+        resolve_locked(
+          await_status::completed,
+          &completion,
+          &completion_state,
+          &status);
+        should_complete = true;
+      } else {
+        values_.set_all(index, std::forward<U>(value));
+        --remaining_;
+        if (remaining_ == 0u) {
+          resolve_locked(
+            await_status::completed,
+            &completion,
+            &completion_state,
+            &status);
+          should_complete = true;
+        }
+      }
+    }
+
+    if (should_complete) {
+      complete_waiter(completion, completion_state, status);
+    }
+  }
+
+  inline void complete_child(size_t index) noexcept {
+    BOUNCE_COMPLETION completion = nullptr;
+    void *completion_state = nullptr;
+    await_status status = await_status::aborted;
+    bool should_complete = false;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (resolved_) {
+        return;
+      }
+
+      if constexpr (ANY) {
+        values_.set_any();
+        any_index_ = index;
+        resolve_locked(
+          await_status::completed,
+          &completion,
+          &completion_state,
+          &status);
+        should_complete = true;
+      } else {
+        values_.set_all(index);
+        --remaining_;
+        if (remaining_ == 0u) {
+          resolve_locked(
+            await_status::completed,
+            &completion,
+            &completion_state,
+            &status);
+          should_complete = true;
+        }
+      }
+    }
+
+    if (should_complete) {
+      complete_waiter(completion, completion_state, status);
+    }
+  }
+
+  inline void fail_child(std::exception_ptr exception) noexcept {
+    BOUNCE_COMPLETION completion = nullptr;
+    void *completion_state = nullptr;
+    await_status status = await_status::aborted;
+    bool should_complete = false;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      if (resolved_) {
+        return;
+      }
+      if (!exception_) {
+        exception_ = exception;
+      }
+
+      if constexpr (ANY) {
+        ++failed_count_;
+        if (failed_count_ >= operation_count_) {
+          resolve_locked(
+            await_status::aborted,
+            &completion,
+            &completion_state,
+            &status);
+          should_complete = true;
+        }
+      } else {
+        resolve_locked(
+          await_status::aborted,
+          &completion,
+          &completion_state,
+          &status);
+        should_complete = true;
+      }
+    }
+
+    if (should_complete) {
+      complete_waiter(completion, completion_state, status);
+    }
+  }
+
+  inline void resolve_from_status(await_status resolved_status) noexcept {
+    BOUNCE_COMPLETION completion = nullptr;
+    void *completion_state = nullptr;
+    await_status status = await_status::aborted;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+
+      resolve_locked(
+        resolved_status,
+        &completion,
+        &completion_state,
+        &status);
+    }
+
+    complete_waiter(completion, completion_state, status);
+  }
+
+  inline void rethrow_if_failed() {
+    std::exception_ptr exception;
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      exception = exception_;
+    }
+
+    if (exception) {
+      std::rethrow_exception(exception);
+    }
+  }
+
+  inline promise_all_result<T> consume_all_result(await_result await) {
+    promise_all_result<T> result {};
+
+    result.await = await;
+    if (await.completed()) {
+      if constexpr (std::is_void_v<T>) {
+        result.count = operation_count_;
+      } else {
+        result.values = values_.consume_all();
+      }
+    }
+    return result;
+  }
+
+  inline promise_any_result<T> consume_any_result(await_result await) {
+    promise_any_result<T> result {};
+
+    result.await = await;
+    if (await.completed()) {
+      result.index = any_index_;
+      if constexpr (!std::is_void_v<T>) {
+        result.value = values_.consume_any();
+      }
+    }
+    return result;
+  }
+};
+
+template<typename T, bool ANY>
+static inline promise<void> promise_group_child_runner(
+  std::shared_ptr<promise_group_state<T, ANY>> state,
+  size_t index,
+  promise<T> operation) {
+  try {
+    if constexpr (std::is_void_v<T>) {
+      co_await operation;
+      state->complete_child(index);
+    } else {
+      T value = co_await operation;
+      state->complete_child(index, std::move(value));
+    }
+  } catch (...) {
+    state->fail_child(std::current_exception());
+  }
+}
+
+template<typename T, bool ANY>
+static inline bool promise_group_start_children(
+  const std::shared_ptr<promise_group_state<T, ANY>> &state,
+  std::vector<promise<T>> &operations) noexcept {
+  for (size_t index = 0u; index < operations.size(); index++) {
+    promise<T> operation = std::move(operations[index]);
+
+    if (!operation) {
+      state->resolve_from_status(await_status::start_failed);
+      return false;
+    }
+
+    if (!fire_and_forget(
+          promise_group_child_runner<T, ANY>(
+            state,
+            index,
+            std::move(operation)))) {
+      state->resolve_from_status(await_status::start_failed);
+      return false;
+    }
+  }
+  return true;
+}
+
+template<typename T>
+static inline promise<promise_all_result<T>> promise_all_core(
+  BOUNCE_CORE *core,
+  std::vector<promise<T>> operations,
+  BOUNCE_CANCELLATION *cancellation) {
+  auto state = std::make_shared<promise_group_state<T, false>>(operations.size());
+
+  if (!state->enable_cancellation(core, cancellation)) {
+    promise_all_result<T> result {};
+
+    result.await = await_result { await_status::start_failed };
+    co_return result;
+  }
+
+  (void)promise_group_start_children<T, false>(state, operations);
+  const await_result await = co_await state->wait();
+
+  state->disable_cancellation();
+  if (await.aborted()) {
+    state->rethrow_if_failed();
+  }
+  co_return state->consume_all_result(await);
+}
+
+template<typename T>
+static inline promise<promise_any_result<T>> promise_any_core(
+  BOUNCE_CORE *core,
+  std::vector<promise<T>> operations,
+  BOUNCE_CANCELLATION *cancellation) {
+  auto state = std::make_shared<promise_group_state<T, true>>(operations.size());
+
+  if (!state->enable_cancellation(core, cancellation)) {
+    promise_any_result<T> result {};
+
+    result.await = await_result { await_status::start_failed };
+    co_return result;
+  }
+
+  (void)promise_group_start_children<T, true>(state, operations);
+  const await_result await = co_await state->wait();
+
+  state->disable_cancellation();
+  if (await.aborted()) {
+    state->rethrow_if_failed();
+  }
+  co_return state->consume_any_result(await);
+}
+
+}  // namespace detail
+
+template<typename TBOUNCE_HANDLE, typename T>
+/**
+ * @brief Wait until all promises complete, similar to JavaScript
+ * `Promise.all`.
+ * @tparam TBOUNCE_HANDLE Bounce handle type exposing `get_core()`.
+ * @tparam T Promise value type, or `void`.
+ * @param bounce_handle Bounce handle used to observe cancellation.
+ * @param operations Promises to consume and wait. Ownership is transferred.
+ * @param cancellation Optional cancellation that can complete the aggregate
+ * wait with @ref await_status::canceled.
+ * @return Promise that resolves to @ref promise_all_result.
+ * @remarks Child promises are started concurrently. If the aggregate wait
+ * finishes early by cancellation or exception, unfinished child promises keep
+ * running in detached internal runners so their coroutine frames are drained.
+ */
+inline promise<promise_all_result<T>> promise_all(
+  TBOUNCE_HANDLE &bounce_handle,
+  std::vector<promise<T>> operations,
+  BOUNCE_CANCELLATION *cancellation = nullptr) {
+  return detail::promise_all_core<T>(
+    bounce_handle.get_core(),
+    std::move(operations),
+    cancellation);
+}
+
+template<typename T>
+/**
+ * @brief Wait until all promises complete using the current bounce core for
+ * cancellation observation.
+ * @tparam T Promise value type, or `void`.
+ * @param operations Promises to consume and wait. Ownership is transferred.
+ * @param cancellation Optional cancellation that can complete the aggregate
+ * wait with @ref await_status::canceled.
+ * @return Promise that resolves to @ref promise_all_result.
+ */
+inline promise<promise_all_result<T>> promise_all(
+  std::vector<promise<T>> operations,
+  BOUNCE_CANCELLATION *cancellation = nullptr) {
+  return detail::promise_all_core<T>(
+    ::bounce_get_core(),
+    std::move(operations),
+    cancellation);
+}
+
+template<typename TBOUNCE_HANDLE, typename T>
+/**
+ * @brief Wait until one promise completes successfully, similar to JavaScript
+ * `Promise.any`.
+ * @tparam TBOUNCE_HANDLE Bounce handle type exposing `get_core()`.
+ * @tparam T Promise value type, or `void`.
+ * @param bounce_handle Bounce handle used to observe cancellation.
+ * @param operations Promises to consume and wait. Ownership is transferred.
+ * @param cancellation Optional cancellation that can complete the aggregate
+ * wait with @ref await_status::canceled.
+ * @return Promise that resolves to @ref promise_any_result.
+ * @remarks Child promises are started concurrently. Promises that do not win
+ * the race keep running in detached internal runners so their coroutine frames
+ * are drained.
+ */
+inline promise<promise_any_result<T>> promise_any(
+  TBOUNCE_HANDLE &bounce_handle,
+  std::vector<promise<T>> operations,
+  BOUNCE_CANCELLATION *cancellation = nullptr) {
+  return detail::promise_any_core<T>(
+    bounce_handle.get_core(),
+    std::move(operations),
+    cancellation);
+}
+
+template<typename T>
+/**
+ * @brief Wait until one promise completes successfully using the current
+ * bounce core for cancellation observation.
+ * @tparam T Promise value type, or `void`.
+ * @param operations Promises to consume and wait. Ownership is transferred.
+ * @param cancellation Optional cancellation that can complete the aggregate
+ * wait with @ref await_status::canceled.
+ * @return Promise that resolves to @ref promise_any_result.
+ */
+inline promise<promise_any_result<T>> promise_any(
+  std::vector<promise<T>> operations,
+  BOUNCE_CANCELLATION *cancellation = nullptr) {
+  return detail::promise_any_core<T>(
+    ::bounce_get_core(),
+    std::move(operations),
+    cancellation);
 }
 
 template<typename TBOUNCE_HANDLE>

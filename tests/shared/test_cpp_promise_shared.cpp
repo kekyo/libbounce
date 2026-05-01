@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #if !defined(BOUNCE_FREERTOS)
 #include <thread>
@@ -543,6 +544,217 @@ static libbounce::promise<int> test_fire_and_forget_value_coroutine(
   co_return 42;
 }
 
+static libbounce::promise<int> test_group_value_child_coroutine(
+  libbounce::bounce &bounce_instance,
+  int value,
+  unsigned int resume_count,
+  std::atomic<unsigned int> *completed_count) {
+  for (unsigned int index = 0u; index < resume_count; index++) {
+    const libbounce::await_result result = co_await libbounce::resume_on(bounce_instance);
+
+    ASSERT_TRUE(result.completed());
+  }
+
+  if (completed_count != nullptr) {
+    completed_count->fetch_add(1u, std::memory_order_release);
+  }
+  co_return value;
+}
+
+static libbounce::promise<int> test_group_canceled_child_coroutine(
+  libbounce::bounce &bounce_instance,
+  libbounce::cancellation &cancellation_source,
+  int value,
+  std::atomic<unsigned int> *completed_count) {
+  const libbounce::await_result result =
+    co_await libbounce::await_canceled(bounce_instance, cancellation_source);
+
+  ASSERT_TRUE(result.canceled());
+  completed_count->fetch_add(1u, std::memory_order_release);
+  co_return value;
+}
+
+static libbounce::promise<int> test_group_semaphore_child_coroutine(
+  libbounce::bounce &bounce_instance,
+  libbounce::async_semaphore &semaphore,
+  int value,
+  std::atomic<unsigned int> *completed_count) {
+  const libbounce::await_result result =
+    co_await semaphore.acquire(bounce_instance, nullptr);
+
+  ASSERT_TRUE(result.completed());
+  completed_count->fetch_add(1u, std::memory_order_release);
+  co_return value;
+}
+
+static libbounce::promise<void> test_promise_all_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  std::vector<libbounce::promise<int>> operations;
+
+  operations.emplace_back(
+    test_group_value_child_coroutine(bounce_instance, 7, 2u, nullptr));
+  operations.emplace_back(
+    test_group_value_child_coroutine(bounce_instance, 11, 1u, nullptr));
+  operations.emplace_back(
+    test_group_value_child_coroutine(bounce_instance, 13, 3u, nullptr));
+
+  const libbounce::promise_all_result<int> result =
+    co_await libbounce::promise_all(
+      bounce_instance,
+      std::move(operations),
+      nullptr);
+
+  ASSERT_TRUE(result.completed());
+  ASSERT_TRUE(result.values.size() == 3u);
+  ASSERT_TRUE(result.values[0] == 7);
+  ASSERT_TRUE(result.values[1] == 11);
+  ASSERT_TRUE(result.values[2] == 13);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_promise_any_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  std::vector<libbounce::promise<int>> operations;
+  libbounce::async_semaphore delayed_gate;
+  std::atomic<unsigned int> delayed_completed { 0u };
+
+  operations.emplace_back(
+    test_group_semaphore_child_coroutine(
+      bounce_instance,
+      delayed_gate,
+      7,
+      &delayed_completed));
+  operations.emplace_back(
+    test_group_value_child_coroutine(
+      bounce_instance,
+      23,
+      1u,
+      nullptr));
+
+  const libbounce::promise_any_result<int> result =
+    co_await libbounce::promise_any(
+      bounce_instance,
+      std::move(operations),
+      nullptr);
+
+  ASSERT_TRUE(result.completed());
+  ASSERT_TRUE(result.index == 1u);
+  ASSERT_TRUE(result.value.has_value());
+  ASSERT_TRUE(*result.value == 23);
+
+  delayed_gate.release();
+  for (unsigned int index = 0u;
+       (index < 10u) &&
+       (delayed_completed.load(std::memory_order_acquire) == 0u);
+       index++) {
+    const libbounce::await_result resume_result =
+      co_await libbounce::resume_on(bounce_instance);
+
+    ASSERT_TRUE(resume_result.completed());
+  }
+
+  ASSERT_TRUE(delayed_completed.load(std::memory_order_acquire) == 1u);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_promise_all_canceled_coroutine(
+  libbounce::bounce &bounce_instance,
+  libbounce::cancellation &cancellation_source,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  std::vector<libbounce::promise<int>> operations;
+  std::atomic<unsigned int> completed_count { 0u };
+
+  operations.emplace_back(
+    test_group_canceled_child_coroutine(
+      bounce_instance,
+      cancellation_source,
+      7,
+      &completed_count));
+  operations.emplace_back(
+    test_group_canceled_child_coroutine(
+      bounce_instance,
+      cancellation_source,
+      11,
+      &completed_count));
+
+  const libbounce::promise_all_result<int> result =
+    co_await libbounce::promise_all(
+      bounce_instance,
+      std::move(operations),
+      cancellation_source.get_cancellation());
+
+  ASSERT_TRUE(result.canceled());
+
+  for (unsigned int index = 0u;
+       (index < 10u) &&
+       (completed_count.load(std::memory_order_acquire) != 2u);
+       index++) {
+    const libbounce::await_result resume_result =
+      co_await libbounce::resume_on(bounce_instance);
+
+    ASSERT_TRUE(resume_result.completed());
+  }
+
+  ASSERT_TRUE(completed_count.load(std::memory_order_acquire) == 2u);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_async_mutex_child_coroutine(
+  libbounce::bounce &bounce_instance,
+  libbounce::async_mutex &mutex,
+  std::atomic<unsigned int> *entered_count) {
+  const libbounce::await_result result =
+    co_await mutex.lock(bounce_instance, nullptr);
+
+  ASSERT_TRUE(result.completed());
+  entered_count->fetch_add(1u, std::memory_order_release);
+  mutex.unlock();
+}
+
+static libbounce::promise<void> test_async_mutex_coroutine(
+  libbounce::bounce &bounce_instance,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  libbounce::async_mutex mutex;
+  std::atomic<unsigned int> entered_count { 0u };
+  const libbounce::await_result lock_result =
+    co_await mutex.lock(bounce_instance, nullptr);
+  auto child = test_async_mutex_child_coroutine(
+    bounce_instance,
+    mutex,
+    &entered_count);
+
+  ASSERT_TRUE(lock_result.completed());
+  ASSERT_TRUE(child.start());
+
+  {
+    const libbounce::await_result result = co_await libbounce::resume_on(bounce_instance);
+
+    ASSERT_TRUE(result.completed());
+  }
+
+  ASSERT_TRUE(entered_count.load(std::memory_order_acquire) == 0u);
+  mutex.unlock();
+  co_await child;
+  ASSERT_TRUE(entered_count.load(std::memory_order_acquire) == 1u);
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
+static libbounce::promise<void> test_async_semaphore_canceled_coroutine(
+  libbounce::bounce &bounce_instance,
+  libbounce::cancellation &cancellation_source,
+  TEST_COMPLETION_CONTEXT *completion_context) {
+  libbounce::async_semaphore semaphore;
+  const libbounce::await_result result =
+    co_await semaphore.acquire(
+      bounce_instance,
+      cancellation_source.get_cancellation());
+
+  ASSERT_TRUE(result.canceled());
+  test_record_completion(completion_context, BOUNCE_COMPLETION_COMPLETED);
+}
+
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(BOUNCE_FREERTOS)
 static libbounce::promise<void> test_condition_await_coroutine(
   libbounce::bounce &bounce_instance,
@@ -1002,6 +1214,97 @@ extern "C" void test_cpp_promise_fire_and_forget_empty_fails(void) {
   libbounce::promise<void> coroutine;
 
   ASSERT_TRUE(!libbounce::fire_and_forget(std::move(coroutine)));
+}
+
+extern "C" void test_cpp_promise_all_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_promise_all_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_any_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_promise_any_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_promise_all_cancellation_runs(void) {
+  libbounce::bounce bounce_instance;
+  libbounce::cancellation cancellation_source;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_promise_all_canceled_coroutine(
+    bounce_instance,
+    cancellation_source,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  cancellation_source.cancel(bounce_instance);
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_async_mutex_lock_runs(void) {
+  libbounce::bounce bounce_instance;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_async_mutex_coroutine(
+    bounce_instance,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
+}
+
+extern "C" void test_cpp_async_semaphore_acquire_canceled(void) {
+  libbounce::bounce bounce_instance;
+  libbounce::cancellation cancellation_source;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  auto coroutine = test_async_semaphore_canceled_coroutine(
+    bounce_instance,
+    cancellation_source,
+    &completion_context);
+
+  test_completion_context_init(&completion_context);
+  test_start_parker(&bounce_instance, &park_context);
+  ASSERT_TRUE(coroutine.start());
+  cancellation_source.cancel(bounce_instance);
+  test_wait_completion_count(&completion_context, 1u);
+  test_wait_promise_done(&coroutine);
+  test_assert_completion_result(&completion_context, BOUNCE_COMPLETION_COMPLETED);
+  test_stop_parker(&bounce_instance, &park_context);
 }
 
 #if defined(BOUNCE_POSIX) || defined(BOUNCE_POSIX_GLIB) || defined(BOUNCE_FREERTOS)
