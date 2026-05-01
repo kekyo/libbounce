@@ -181,6 +181,7 @@ struct BOUNCE_FILE_IO {
   BOUNCE_CORE *bounce;
   BOUNCE_COMPLETION completion;
   void *completion_state;
+  BOUNCE_CANCELLATION *cancellation;
   int fd;
   void *buffer;
   const void *const_buffer;

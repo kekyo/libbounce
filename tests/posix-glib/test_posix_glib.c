@@ -46,6 +46,12 @@ extern void test_cpp_wrapper_file_io_runs(void);
 extern void test_cpp_wrapper_socket_io_runs(void);
 extern void test_posix_glib_gtk3_example_button_click_writes_sample_file(void);
 extern void test_posix_io_uring_glib_gtk3_example_button_click_writes_sample_file(void);
+#if defined(__linux__) && defined(LIBBOUNCE_ENABLE_FILE_IO_URING_TEST_HOOKS)
+extern void bounce_posix_file_io_uring_set_test_result_override(
+  int result,
+  unsigned int count);
+extern unsigned int bounce_posix_file_io_uring_test_result_override_hits(void);
+#endif
 
 #if defined(LIBBOUNCE_ENABLE_COROUTINE_TESTS)
 extern void test_cpp_promise_resume_on_runs(void);
@@ -764,6 +770,267 @@ static int test_open_temporary_file(void) {
   ASSERT_TRUE(g_unlink(path) == 0);
   return fd;
 }
+
+#if defined(__linux__) && defined(LIBBOUNCE_ENABLE_FILE_IO_URING_TEST_HOOKS)
+static bool test_file_io_uring_available(const BOUNCE_CORE *bounce) {
+  return (bounce != NULL) && (bounce->io_uring_ring != NULL);
+}
+
+static void test_wait_file_io_uring_override_hits(unsigned int expected_hits) {
+  const double started_ms = test_monotonic_now_ms();
+  const struct timespec delay = { 0, 1000000L };
+
+  while (bounce_posix_file_io_uring_test_result_override_hits() < expected_hits) {
+    ASSERT_TRUE((test_monotonic_now_ms() - started_ms) < (double)TEST_TIMEOUT_MS);
+    (void)nanosleep(&delay, NULL);
+  }
+}
+
+static void test_file_io_uring_write_retries_eintr_until_success(void) {
+  static const char payload[] = "libbounce POSIX+GLib file io_uring EINTR write payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  char buffer[sizeof payload];
+  const int fd = test_open_temporary_file();
+
+  memset(&buffer[0], 0, sizeof buffer);
+  bounce_init(&bounce);
+  if (!test_file_io_uring_available(&bounce)) {
+    bounce_deinit(&bounce);
+    ASSERT_TRUE(close(fd) == 0);
+    return;
+  }
+
+  bounce_file_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+  bounce_posix_file_io_uring_set_test_result_override(-EINTR, 2u);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_file_write(
+    &bounce,
+    &operation,
+    fd,
+    &payload[0],
+    0,
+    sizeof payload,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  ASSERT_TRUE(bounce_posix_file_io_uring_test_result_override_hits() == 2u);
+  test_completion_context_destroy(&completion_context);
+
+  ASSERT_TRUE(lseek(fd, 0, SEEK_SET) == 0);
+  ASSERT_TRUE(read(fd, &buffer[0], sizeof buffer) == (ssize_t)sizeof buffer);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+
+  bounce_posix_file_io_uring_set_test_result_override(0, 0u);
+  test_stop_parker(&bounce, &park_context);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(fd) == 0);
+}
+
+static void test_file_io_uring_read_retries_eintr_until_success(void) {
+  static const char payload[] = "libbounce POSIX+GLib file io_uring EINTR read payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  char buffer[sizeof payload];
+  const int fd = test_open_temporary_file();
+
+  ASSERT_TRUE(write(fd, &payload[0], sizeof payload) == (ssize_t)sizeof payload);
+  memset(&buffer[0], 0, sizeof buffer);
+  bounce_init(&bounce);
+  if (!test_file_io_uring_available(&bounce)) {
+    bounce_deinit(&bounce);
+    ASSERT_TRUE(close(fd) == 0);
+    return;
+  }
+
+  bounce_file_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+  bounce_posix_file_io_uring_set_test_result_override(-EINTR, 2u);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_file_read(
+    &bounce,
+    &operation,
+    fd,
+    &buffer[0],
+    0,
+    sizeof buffer,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == (int64_t)sizeof payload);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  ASSERT_TRUE(bounce_posix_file_io_uring_test_result_override_hits() == 2u);
+  ASSERT_TRUE(memcmp(&buffer[0], &payload[0], sizeof payload) == 0);
+  test_completion_context_destroy(&completion_context);
+
+  bounce_posix_file_io_uring_set_test_result_override(0, 0u);
+  test_stop_parker(&bounce, &park_context);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(fd) == 0);
+}
+
+static void test_file_io_uring_flush_retries_eintr_until_success(void) {
+  static const char payload[] = "libbounce POSIX+GLib file io_uring EINTR flush payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  const int fd = test_open_temporary_file();
+
+  ASSERT_TRUE(write(fd, &payload[0], sizeof payload) == (ssize_t)sizeof payload);
+  bounce_init(&bounce);
+  if (!test_file_io_uring_available(&bounce)) {
+    bounce_deinit(&bounce);
+    ASSERT_TRUE(close(fd) == 0);
+    return;
+  }
+
+  bounce_file_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+  bounce_posix_file_io_uring_set_test_result_override(-EINTR, 1u);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_file_flush(
+    &bounce,
+    &operation,
+    fd,
+    BOUNCE_FILE_FLUSH_FULL,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == 0);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == 0);
+  ASSERT_TRUE(bounce_posix_file_io_uring_test_result_override_hits() == 1u);
+  test_completion_context_destroy(&completion_context);
+
+  bounce_posix_file_io_uring_set_test_result_override(0, 0u);
+  test_stop_parker(&bounce, &park_context);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(fd) == 0);
+}
+
+static void test_file_io_uring_non_eintr_error_is_reported(void) {
+  static const char payload[] = "libbounce POSIX+GLib file io_uring non-EINTR payload";
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  const int fd = test_open_temporary_file();
+
+  bounce_init(&bounce);
+  if (!test_file_io_uring_available(&bounce)) {
+    bounce_deinit(&bounce);
+    ASSERT_TRUE(close(fd) == 0);
+    return;
+  }
+
+  bounce_file_io_init(&operation);
+  test_start_parker(&bounce, &park_context);
+  bounce_posix_file_io_uring_set_test_result_override(-EBADF, 1u);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_file_write(
+    &bounce,
+    &operation,
+    fd,
+    &payload[0],
+    0,
+    sizeof payload,
+    test_completion_callback,
+    &completion_context,
+    NULL));
+  test_wait_completion_count(&completion_context, 1u);
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_COMPLETED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == -1);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == EBADF);
+  ASSERT_TRUE(bounce_posix_file_io_uring_test_result_override_hits() == 1u);
+  test_completion_context_destroy(&completion_context);
+
+  bounce_posix_file_io_uring_set_test_result_override(0, 0u);
+  test_stop_parker(&bounce, &park_context);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(fd) == 0);
+}
+
+static void test_file_io_uring_retry_preserves_cancellation(void) {
+  BOUNCE_CORE bounce;
+  BOUNCE_FILE_IO operation;
+  BOUNCE_CANCELLATION cancellation;
+  TEST_PARK_THREAD_CONTEXT park_context;
+  TEST_COMPLETION_CONTEXT completion_context;
+  int pipe_fds[2];
+  unsigned char input = 0x5au;
+  unsigned char output = 0u;
+
+  ASSERT_TRUE(pipe(&pipe_fds[0]) == 0);
+  ASSERT_TRUE(write(pipe_fds[1], &input, sizeof input) == (ssize_t)sizeof input);
+  bounce_init(&bounce);
+  if (!test_file_io_uring_available(&bounce)) {
+    bounce_deinit(&bounce);
+    ASSERT_TRUE(close(pipe_fds[0]) == 0);
+    ASSERT_TRUE(close(pipe_fds[1]) == 0);
+    return;
+  }
+
+  bounce_file_io_init(&operation);
+  bounce_cancellation_init(&cancellation);
+  test_start_parker(&bounce, &park_context);
+  bounce_posix_file_io_uring_set_test_result_override(-EINTR, 1u);
+
+  test_completion_context_init(&completion_context, NULL);
+  ASSERT_TRUE(bounce_await_file_read(
+    &bounce,
+    &operation,
+    pipe_fds[0],
+    &output,
+    BOUNCE_FILE_OFFSET_CURRENT,
+    sizeof output,
+    test_completion_callback,
+    &completion_context,
+    &cancellation));
+  test_wait_file_io_uring_override_hits(1u);
+  bounce_cancel(&bounce, &cancellation);
+  test_wait_completion_count(&completion_context, 1u);
+
+  ASSERT_TRUE(completion_context.call_count == 1u);
+  ASSERT_TRUE(completion_context.result == BOUNCE_COMPLETION_CANCELED);
+  ASSERT_TRUE(bounce_file_io_result(&operation) == -1);
+  ASSERT_TRUE(bounce_file_io_error(&operation) == ECANCELED);
+  ASSERT_TRUE(bounce_posix_file_io_uring_test_result_override_hits() == 1u);
+
+  bounce_posix_file_io_uring_set_test_result_override(0, 0u);
+  test_completion_context_destroy(&completion_context);
+  test_stop_parker(&bounce, &park_context);
+  bounce_cancellation_deinit(&cancellation);
+  bounce_file_io_deinit(&operation);
+  bounce_deinit(&bounce);
+  ASSERT_TRUE(close(pipe_fds[0]) == 0);
+  ASSERT_TRUE(close(pipe_fds[1]) == 0);
+}
+#endif
 
 static void test_file_read_write_seek_flush_await_runs(void) {
   static const char payload[] = "libbounce POSIX+GLib file helper payload";
@@ -1945,6 +2212,13 @@ int main(void) {
     TEST_CASE_ENTRY(test_single_fd_read_await_runs),
     TEST_CASE_ENTRY(test_file_read_write_seek_flush_await_runs),
     TEST_CASE_ENTRY(test_file_read_await_cancel_completes_canceled),
+#if defined(__linux__) && defined(LIBBOUNCE_ENABLE_FILE_IO_URING_TEST_HOOKS)
+    TEST_CASE_ENTRY(test_file_io_uring_write_retries_eintr_until_success),
+    TEST_CASE_ENTRY(test_file_io_uring_read_retries_eintr_until_success),
+    TEST_CASE_ENTRY(test_file_io_uring_flush_retries_eintr_until_success),
+    TEST_CASE_ENTRY(test_file_io_uring_non_eintr_error_is_reported),
+    TEST_CASE_ENTRY(test_file_io_uring_retry_preserves_cancellation),
+#endif
     TEST_CASE_ENTRY(test_socket_send_recv_await_runs),
     TEST_CASE_ENTRY(test_socket_recvfrom_await_cancel_completes_canceled),
     TEST_CASE_ENTRY(test_socket_send_await_reports_syscall_error),

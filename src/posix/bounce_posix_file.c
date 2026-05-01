@@ -36,6 +36,12 @@
 static void bounce_posix_file_io_uring_prepare(
   struct io_uring_sqe *sqe,
   void *prepare_state);
+static void bounce_posix_file_await_io_uring(
+  BOUNCE_CORE *r,
+  BOUNCE_POSIX_IO_URING_OP *io_uring_operation,
+  BOUNCE_COMPLETION completion,
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation);
 #endif
 
 static inline int bounce_posix_file_lock(pthread_mutex_t *mutex) {
@@ -59,6 +65,7 @@ static void bounce_posix_file_clear_active(BOUNCE_FILE_IO *operation) {
   operation->bounce = NULL;
   operation->completion = NULL;
   operation->completion_state = NULL;
+  operation->cancellation = NULL;
   operation->active = false;
   operation->cancellation_registration_active = false;
   (void)bounce_posix_file_unlock(&operation->lock);
@@ -85,6 +92,7 @@ static void bounce_posix_file_finish(
     operation->bounce = NULL;
     operation->completion = NULL;
     operation->completion_state = NULL;
+    operation->cancellation = NULL;
     operation->active = false;
     operation->cancellation_registration_active = false;
   }
@@ -254,7 +262,8 @@ static bool bounce_posix_file_begin(
   int whence,
   BOUNCE_FILE_FLUSH_MODE flush_mode,
   BOUNCE_COMPLETION completion,
-  void *completion_state) {
+  void *completion_state,
+  BOUNCE_CANCELLATION *cancellation) {
   if ((r == NULL) ||
       (operation == NULL) ||
       (fd < 0) ||
@@ -286,6 +295,7 @@ static bool bounce_posix_file_begin(
   operation->bounce = r;
   operation->completion = completion;
   operation->completion_state = completion_state;
+  operation->cancellation = cancellation;
   operation->fd = fd;
   operation->buffer = buffer;
   operation->const_buffer = const_buffer;
@@ -467,6 +477,48 @@ static void bounce_posix_file_await_transfer_ready(
 }
 
 #if defined(__linux__)
+#if defined(LIBBOUNCE_ENABLE_FILE_IO_URING_TEST_HOOKS)
+static pthread_mutex_t bounce_posix_file_io_uring_test_lock =
+  PTHREAD_MUTEX_INITIALIZER;
+static int bounce_posix_file_io_uring_test_result_override = 0;
+static unsigned int bounce_posix_file_io_uring_test_override_remaining = 0u;
+static unsigned int bounce_posix_file_io_uring_test_override_hits = 0u;
+
+void bounce_posix_file_io_uring_set_test_result_override(
+  int result,
+  unsigned int count) {
+  (void)bounce_posix_file_lock(&bounce_posix_file_io_uring_test_lock);
+  bounce_posix_file_io_uring_test_result_override = result;
+  bounce_posix_file_io_uring_test_override_remaining = count;
+  bounce_posix_file_io_uring_test_override_hits = 0u;
+  (void)bounce_posix_file_unlock(&bounce_posix_file_io_uring_test_lock);
+}
+
+unsigned int bounce_posix_file_io_uring_test_result_override_hits(void) {
+  unsigned int hits;
+
+  (void)bounce_posix_file_lock(&bounce_posix_file_io_uring_test_lock);
+  hits = bounce_posix_file_io_uring_test_override_hits;
+  (void)bounce_posix_file_unlock(&bounce_posix_file_io_uring_test_lock);
+  return hits;
+}
+
+static int bounce_posix_file_io_uring_filter_test_result(int result) {
+  (void)bounce_posix_file_lock(&bounce_posix_file_io_uring_test_lock);
+  if (bounce_posix_file_io_uring_test_override_remaining > 0u) {
+    result = bounce_posix_file_io_uring_test_result_override;
+    bounce_posix_file_io_uring_test_override_remaining -= 1u;
+    bounce_posix_file_io_uring_test_override_hits += 1u;
+  }
+  (void)bounce_posix_file_unlock(&bounce_posix_file_io_uring_test_lock);
+  return result;
+}
+#else
+static int bounce_posix_file_io_uring_filter_test_result(int result) {
+  return result;
+}
+#endif
+
 static uint64_t bounce_posix_file_io_uring_offset(int64_t offset) {
   return (offset == BOUNCE_FILE_OFFSET_CURRENT) ?
            UINT64_MAX :
@@ -514,7 +566,8 @@ static void bounce_posix_file_io_uring_completion(
   void *completion_state) {
   BOUNCE_FILE_IO *operation = (BOUNCE_FILE_IO *)completion_state;
   const int io_uring_result =
-    bounce_posix_io_uring_op_result(&operation->io_uring_operation);
+    bounce_posix_file_io_uring_filter_test_result(
+      bounce_posix_io_uring_op_result(&operation->io_uring_operation));
 
   if (result != BOUNCE_COMPLETION_COMPLETED) {
     bounce_posix_file_finish_terminal(operation, result);
@@ -528,11 +581,31 @@ static void bounce_posix_file_io_uring_completion(
       (int64_t)io_uring_result,
       0);
   } else {
+    const int error_code = -io_uring_result;
+
+    if (error_code == EINTR) {
+      BOUNCE_CORE *r;
+      BOUNCE_CANCELLATION *cancellation;
+
+      (void)bounce_posix_file_lock(&operation->lock);
+      r = operation->bounce;
+      cancellation = operation->cancellation;
+      (void)bounce_posix_file_unlock(&operation->lock);
+
+      bounce_posix_file_await_io_uring(
+        r,
+        &operation->io_uring_operation,
+        bounce_posix_file_io_uring_completion,
+        operation,
+        cancellation);
+      return;
+    }
+
     bounce_posix_file_finish(
       operation,
       BOUNCE_COMPLETION_COMPLETED,
       -1,
-      -io_uring_result);
+      error_code);
   }
 }
 
@@ -634,7 +707,8 @@ bool bounce_await_file_read(
         0,
         BOUNCE_FILE_FLUSH_FULL,
         completion,
-        completion_state)) {
+        completion_state,
+        cancellation)) {
     return false;
   }
 
@@ -686,7 +760,8 @@ bool bounce_await_file_write(
         0,
         BOUNCE_FILE_FLUSH_FULL,
         completion,
-        completion_state)) {
+        completion_state,
+        cancellation)) {
     return false;
   }
 
@@ -737,7 +812,8 @@ bool bounce_await_file_seek(
            whence,
            BOUNCE_FILE_FLUSH_FULL,
            completion,
-           completion_state) &&
+           completion_state,
+           cancellation) &&
          bounce_posix_file_post_started(operation, cancellation);
 }
 
@@ -761,7 +837,8 @@ bool bounce_await_file_flush(
         0,
         mode,
         completion,
-        completion_state)) {
+        completion_state,
+        cancellation)) {
     return false;
   }
 
