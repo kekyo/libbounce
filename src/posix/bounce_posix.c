@@ -270,17 +270,30 @@ static inline void bounce_posix_signal_fd(int fd) {
   }
 }
 
-static inline void bounce_posix_signal_parkers(BOUNCE_CORE *r) {
-  if (r != NULL) {
+static inline void bounce_posix_signal_parkers_count(
+  BOUNCE_CORE *r,
+  unsigned int wake_count) {
+  if ((r != NULL) && (wake_count > 0u)) {
 #if defined(__linux__)
     if (r->linux_unified_wait_enabled &&
         (r->wake_pipe_fds[1] >= 0)) {
-      bounce_posix_signal_fd(r->wake_pipe_fds[1]);
+      unsigned int bounded_wake_count = wake_count;
+
+      if (bounded_wake_count > BOUNCE_MAX_READY_WAKE_FANOUT) {
+        bounded_wake_count = BOUNCE_MAX_READY_WAKE_FANOUT;
+      }
+      for (unsigned int index = 0u; index < bounded_wake_count; index++) {
+        bounce_posix_signal_fd(r->wake_pipe_fds[1]);
+      }
       return;
     }
 #endif
     (void)pthread_cond_broadcast(&r->parkers_cond);
   }
+}
+
+static inline void bounce_posix_signal_parkers(BOUNCE_CORE *r) {
+  bounce_posix_signal_parkers_count(r, 1u);
 }
 
 static inline void bounce_posix_signal_waiter(__BOUNCE_POSIX_WAITER *waiter) {
@@ -1576,7 +1589,7 @@ void bounce_await_posix_condition(
 void bounce_posix_condition_raise(
   BOUNCE_CORE *r,
   BOUNCE_POSIX_CONDITION *condition) {
-  bool wake_parkers = false;
+  unsigned int wake_count = 0u;
 
   if ((r == NULL) ||
       (condition == NULL)) {
@@ -1614,13 +1627,15 @@ void bounce_posix_condition_raise(
       r,
       item,
       BOUNCE_COMPLETION_COMPLETED);
-    wake_parkers = true;
+    if (wake_count < BOUNCE_MAX_READY_WAKE_FANOUT) {
+      wake_count += 1u;
+    }
   }
   (void)bounce_posix_unlock(&condition->lock);
   (void)bounce_posix_unlock(&r->lock);
 
-  if (wake_parkers) {
-    bounce_posix_signal_parkers(r);
+  if (wake_count > 0u) {
+    bounce_posix_signal_parkers_count(r, wake_count);
   }
 }
 
