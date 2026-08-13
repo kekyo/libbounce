@@ -9,6 +9,8 @@ A small thread dispatch library that handles asynchronous I/O.
 
 ---
 
+NOTE: Sorry, libbounce is deprecated. Use [cardio](https://github.com/kekyo/cardio/) instead.
+
 [(Japanese language is here/日本語はこちら)](./README_ja.md)
 
 > Please note that this English version of the document was machine-translated and then partially edited, so it may contain inaccuracies.
